@@ -1,0 +1,5 @@
+/target/
+/.biscuits/
+/.terminal_ai_agent/
+/biscuit/
+.DS_Store

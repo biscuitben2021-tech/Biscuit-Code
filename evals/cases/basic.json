@@ -1,0 +1,14 @@
+[
+  {
+    "name": "basic_concise_reply",
+    "category": "smoke",
+    "description": "Checks that the assistant can answer a simple request without tools.",
+    "prompt": "Reply with a short greeting that includes the word hello.",
+    "tool_matching_mode": "contains_any",
+    "output_matcher": {
+      "type": "regex",
+      "value": "(?i)hello"
+    },
+    "timeout_secs": 60
+  }
+]

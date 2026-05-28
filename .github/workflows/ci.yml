@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy rustfmt
+          rustup default stable
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Release build
+        run: cargo build --release --locked
+
+      - name: Smoke binaries
+        if: runner.os != 'Windows'
+        run: |
+          ./target/release/biscuits --help
+          ./target/release/biscuit --help
+          ./target/release/biscuits eval --smoke
+
+      - name: Smoke binaries (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          .\target\release\biscuits.exe --help
+          .\target\release\biscuit.exe --help
+          .\target\release\biscuits.exe eval --smoke
