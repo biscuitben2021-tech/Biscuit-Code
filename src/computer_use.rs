@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -399,7 +399,7 @@ fn append_screenshot_result(out: &mut String, screenshot: Result<PathBuf>) {
 fn capture_screenshot_to(path: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        let output = Command::new("screencapture")
+        let output = std::process::Command::new("screencapture")
             .arg("-x")
             .arg(path)
             .output()
@@ -426,7 +426,7 @@ fn capture_screenshot_to(path: &Path) -> Result<()> {
             if !command_exists(program) {
                 continue;
             }
-            let mut command = Command::new(program);
+            let mut command = std::process::Command::new(program);
             for arg in candidate.iter().skip(1) {
                 command.arg(arg);
             }
@@ -448,7 +448,7 @@ fn capture_screenshot_to(path: &Path) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn command_exists(program: &str) -> bool {
-    Command::new("sh")
+    std::process::Command::new("sh")
         .arg("-lc")
         .arg(format!("command -v {}", crate::shell::quote(program)))
         .stdout(Stdio::null())
