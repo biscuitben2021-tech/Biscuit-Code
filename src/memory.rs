@@ -1621,7 +1621,10 @@ fn rel_path(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
         .to_string_lossy()
-        .to_string()
+        // Normalize to forward slashes so the biscuit-log skip checks (which
+        // compare against "biscuit/" and ".biscuits/") work on Windows, where
+        // strip_prefix yields backslash separators.
+        .replace('\\', "/")
 }
 
 fn read_json_or_default<T>(path: &Path) -> Result<T>
@@ -2222,6 +2225,18 @@ mod tests {
 
         fs::remove_dir_all(workspace).ok();
         Ok(())
+    }
+
+    #[test]
+    fn biscuit_log_paths_are_detected_after_separator_normalization() {
+        // rel_path normalizes separators, so a Windows-style backslash path must
+        // classify as a biscuit log exactly like its forward-slash form. This is
+        // the regression guard for the change-log skip check on Windows.
+        assert!(is_biscuit_log_path("biscuit/logs.md"));
+        assert!(is_biscuit_log_path("biscuit/logs2.md"));
+        assert!(is_biscuit_log_path(&"biscuit\\logs2.md".replace('\\', "/")));
+        assert!(!is_biscuit_log_path("biscuit/handoff.md"));
+        assert!(!is_biscuit_log_path("biscuit\\logs2.md"));
     }
 
     fn temp_workspace(name: &str) -> Result<PathBuf> {

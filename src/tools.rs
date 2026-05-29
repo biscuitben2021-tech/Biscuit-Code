@@ -775,7 +775,9 @@ fn rel(workspace: &Path, path: &Path) -> String {
     path.strip_prefix(workspace)
         .unwrap_or(path)
         .to_string_lossy()
-        .to_string()
+        // Normalize to forward slashes so is_biscuit_log and downstream matching
+        // behave the same on Windows (where strip_prefix yields backslashes).
+        .replace('\\', "/")
 }
 
 fn strip_html(input: &str) -> String {
