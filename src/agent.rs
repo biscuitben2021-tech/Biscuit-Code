@@ -58,12 +58,15 @@ pub async fn run_turn(
             println!("\n[working] planning next action...");
         }
         let memory_context = memory.system_context(prompt)?;
-        let tool_system = format!(
-            "{}\n\n{}\n\n{}",
-            memory_context,
-            tools.system_prompt(),
-            extra_system_context
-        );
+        // Recompute each iteration: a tool call this turn (e.g. /skills disable)
+        // can change which skills are enabled, so this must not be cached.
+        let skills_context = tools.skills_context(prompt);
+        let tool_system = join_sections(&[
+            &memory_context,
+            &tools.system_prompt(),
+            &skills_context,
+            extra_system_context,
+        ]);
         let plan = llm::complete_history(client, config, &tool_system, history).await?;
         let calls = tools::parse_calls(&plan)?;
         if calls.is_empty() {
@@ -119,11 +122,15 @@ pub async fn run_turn(
 
     activity.stop_listening();
     let memory_context = memory.system_context(prompt)?;
-    let system_context = format!(
-        "{}\n\n{}\n\n{}\n\nTool planning for this turn is complete. Answer normally now. Do not emit tool_call tags.",
-        memory_context,
-        tools.system_prompt(),
-        extra_system_context
+    let skills_context = tools.skills_context(prompt);
+    let mut system_context = join_sections(&[
+        &memory_context,
+        &tools.system_prompt(),
+        &skills_context,
+        extra_system_context,
+    ]);
+    system_context.push_str(
+        "\n\nTool planning for this turn is complete. Answer normally now. Do not emit tool_call tags.",
     );
     let input_chars = system_context.len() + history.iter().map(|m| m.text.len()).sum::<usize>();
     if print_final {
@@ -192,4 +199,15 @@ async fn execute_slash_tool(
         .await?
         .ok_or_else(|| anyhow::anyhow!("not a slash command: {command}"))?;
     Ok(format!("slash command: {command}\n{output}"))
+}
+
+/// Join system-prompt sections with blank lines, skipping any that are empty so
+/// an absent section (e.g. no selected skills) does not leave a blank gap.
+fn join_sections(sections: &[&str]) -> String {
+    sections
+        .iter()
+        .map(|section| section.trim())
+        .filter(|section| !section.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }

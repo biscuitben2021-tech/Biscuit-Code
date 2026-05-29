@@ -9,6 +9,7 @@ mod memory;
 mod observations;
 mod permissions;
 mod shell;
+mod skills;
 mod test_harness;
 mod tools;
 
@@ -44,7 +45,7 @@ pub async fn run() -> Result<()> {
         println!("eval: biscuits eval --smoke");
         println!("harness: biscuits harness baseline|run|diff");
         println!(
-            "commands: /help, /clear, /remember, /forget, /memories, /handoff, /biscuits, /sessions, /resume, /last, /config, /shortcut, /goal, /plan, /observe, /computer-use, /mcp, /memory-mode, /privacy, /permissions"
+            "commands: /help, /clear, /remember, /forget, /memories, /handoff, /biscuits, /sessions, /resume, /last, /config, /shortcut, /goal, /plan, /observe, /computer-use, /mcp, /skills, /memory-mode, /privacy, /permissions"
         );
         return Ok(());
     }

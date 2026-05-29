@@ -1,6 +1,6 @@
 use crate::{
     computer_use::ComputerUseRuntime, goals::GoalStore, mcp::McpManager,
-    observations::ObservationSystem,
+    observations::ObservationSystem, skills::SkillStore,
 };
 use anyhow::{bail, Context, Result};
 use glob::{glob, Pattern};
@@ -24,6 +24,7 @@ pub struct ToolRuntime {
     observations: ObservationSystem,
     computer_use: ComputerUseRuntime,
     mcp: McpManager,
+    skills: SkillStore,
     monitors: HashMap<u64, Monitor>,
     next_monitor: u64,
 }
@@ -128,15 +129,24 @@ impl ToolRuntime {
         let observations = ObservationSystem::new(workspace.clone());
         let computer_use = ComputerUseRuntime::new(workspace.clone());
         let mcp = McpManager::open(&workspace)?;
+        let skills = SkillStore::open(&workspace)?;
         Ok(Self {
             workspace,
             goals,
             observations,
             computer_use,
             mcp,
+            skills,
             monitors: HashMap::new(),
             next_monitor: 1,
         })
+    }
+
+    /// Returns the `<selected_skills>` system block for this user message, or
+    /// an empty string when no enabled skill is relevant. Selection depends on
+    /// the message, so this is computed per turn rather than in `system_prompt`.
+    pub fn skills_context(&self, user_message: &str) -> String {
+        self.skills.selected_context(user_message)
     }
 
     pub fn system_prompt(&self) -> String {
@@ -186,6 +196,9 @@ Use Read before editing files you have not inspected. Prefer Edit for precise ch
             return Ok(Some(output));
         }
         if let Some(output) = self.mcp.command_output(input)? {
+            return Ok(Some(output));
+        }
+        if let Some(output) = self.skills.command_output(input)? {
             return Ok(Some(output));
         }
         self.goals.command_output(input)

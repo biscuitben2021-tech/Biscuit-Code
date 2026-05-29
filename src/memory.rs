@@ -2003,6 +2003,12 @@ const HELP: &str = r#"commands:
   /mcp tools [name]         list tools exposed by MCP servers
   /mcp call <server> <tool> <json>
                             call an MCP tool with JSON arguments
+  /skills                   list discovered skills and their status
+  /skills refresh           reload skills from disk
+  /skills show <name>       show a skill's metadata and file path
+  /skills enable <name>     enable a skill (source file untouched)
+  /skills disable <name>    disable a skill (source file untouched)
+  /skills selected <msg>    show which skills a message would select
   /memory-mode              show memory mode
   /memory-mode best         extract after every normal turn
   /memory-mode hybrid       extract every third normal turn

@@ -72,10 +72,11 @@ API keys are requested at launch or read from environment variables. The saved p
 
 Biscuits keeps project-local state in the folder you launch it from:
 
-- `.biscuits/` for conversations, settings, goals, eval reports, MCP config, and runtime state
+- `.biscuits/` for conversations, settings, goals, eval reports, MCP config, skill state, and runtime state
 - `BISCUITS.md` for editable project memory
 - `biscuit/handoff.md` for current project requirements and handoff notes
 - `biscuit/logs.md` for runtime-maintained change logs
+- `skills/` (optional) for shared skill packs you commit alongside the project
 
 These runtime files are ignored by default except `BISCUITS.md`, which you may choose to commit when project memory should travel with the repo.
 
@@ -101,7 +102,91 @@ These runtime files are ignored by default except `BISCUITS.md`, which you may c
 /memory-mode hybrid    extract memory every third normal turn
 /memory-mode tool      only save explicit /remember memories
 /mcp                   connect and use MCP servers
+/skills                list discovered skills and their status
+/skills disable <name> stop a skill from being injected
 ```
+
+## Skills
+
+Skills are portable Markdown instruction packs that teach Biscuits a reusable
+workflow, tool preference, or domain behavior. Each skill lives in its own
+folder containing a `SKILL.md` file. Biscuits discovers skills at startup,
+then for every message it selects only the few skills that look relevant and
+injects them into the model context. Skills that do not match are never sent,
+so prompts stay small.
+
+### Folder layout
+
+Biscuits looks for skills in three places, highest precedence first. When the
+same skill name appears in more than one place, the higher-precedence copy
+wins:
+
+```text
+.biscuits/skills/<name>/SKILL.md   # project skills (per workspace, not committed)
+skills/<name>/SKILL.md             # shared repo skills (commit to share with your team)
+<config>/biscuits/skills/<name>/SKILL.md   # your personal global skills
+```
+
+The global directory follows your OS config location:
+
+- macOS: `~/Library/Application Support/biscuits/skills/`
+- Linux: `~/.config/biscuits/skills/`
+- Windows: `%APPDATA%\biscuits\skills\`
+
+### Example `SKILL.md`
+
+```markdown
+---
+name: rust-debugger
+description: Debugs Rust compiler, clippy, test, and CI failures.
+triggers:
+  - rust
+  - cargo
+  - clippy
+  - compiler error
+tools:
+  - Read
+  - Grep
+  - Bash
+  - Edit
+enabled: true
+---
+
+# Rust Debugger
+
+When a Rust build or test fails:
+
+1. Read the failing command output and find the first real error.
+2. Open the referenced file and locate the root cause.
+3. Make the smallest correct fix, then re-run the failing command.
+```
+
+The frontmatter is optional. If it is missing, Biscuits infers the skill name
+from the folder name and uses the first heading or paragraph as the
+description. `triggers`, `tools`, and `enabled` are all optional too.
+
+### How selection works
+
+For each message, Biscuits scores enabled skills by matching trigger phrases,
+the skill name, and description keywords, preferring strong matches (a trigger
+or name hit) over weak keyword overlap. Ask about a Rust failure and the
+`rust-debugger` skill above is selected automatically. Skills are treated as
+guidance, not absolute truth — your latest instructions always override them.
+
+### Commands
+
+```text
+/skills                    list discovered skills with enabled/disabled status and source
+/skills refresh            reload skills from disk
+/skills show <name>        show a skill's metadata and file path
+/skills enable <name>      enable a skill
+/skills disable <name>     disable a skill
+/skills selected <message> debug which skills a message would select
+```
+
+Enable/disable state is stored in `.biscuits/skills.json`; the `SKILL.md`
+source files are never modified. Skills work the same on macOS, Windows, and
+Linux.
 
 ## Development
 

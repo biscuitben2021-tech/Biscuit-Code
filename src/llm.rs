@@ -62,7 +62,7 @@ pub struct Shortcut {
     pub command: String,
 }
 
-fn config_dir_path() -> Option<PathBuf> {
+pub(crate) fn config_dir_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("biscuits"))
 }
 
