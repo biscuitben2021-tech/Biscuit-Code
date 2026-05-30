@@ -1,0 +1,18 @@
+appId: com.biscuits.browser
+productName: Biscuit Browser
+directories:
+  output: release
+  buildResources: build
+files:
+  - out/**/*
+  - package.json
+mac:
+  target:
+    - dmg
+    - zip
+  category: public.app-category.productivity
+win:
+  target:
+    - nsis
+    - zip
+# TODO(phase-later): code signing / notarization config for macOS and Windows.
