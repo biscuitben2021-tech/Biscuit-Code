@@ -2,7 +2,7 @@ import type { ContractActionName, TaskContract } from '@shared/types'
 import { CONTRACT_SYSTEM } from './prompts'
 import { llmJson, type LlmConfig } from './llm'
 
-const KNOWN_ACTIONS: ContractActionName[] = [
+export const KNOWN_ACTIONS: ContractActionName[] = [
   'open',
   'read',
   'search',
@@ -19,7 +19,8 @@ const KNOWN_ACTIONS: ContractActionName[] = [
   'settings'
 ]
 
-function normalizeActions(value: unknown): ContractActionName[] {
+/** Keep only recognized, de-duplicated action names from arbitrary model output. */
+export function normalizeActions(value: unknown): ContractActionName[] {
   if (!Array.isArray(value)) return []
   const out: ContractActionName[] = []
   for (const raw of value) {
@@ -28,6 +29,25 @@ function normalizeActions(value: unknown): ContractActionName[] {
     if (KNOWN_ACTIONS.includes(a) && !out.includes(a)) out.push(a)
   }
   return out
+}
+
+/**
+ * Turn a raw, untrusted model JSON object into a safe TaskContract. Pure and
+ * deterministic — unit-tested. If the model produced nothing usable, the
+ * conservative fallback contract is returned instead.
+ */
+export function parseContract(raw: Record<string, unknown>, prompt: string): TaskContract {
+  const clean = prompt.trim()
+  const goal = typeof raw.goal === 'string' && raw.goal.trim() ? raw.goal.trim() : clean
+  const contract: TaskContract = {
+    goal: goal.slice(0, 400),
+    allowed_actions: normalizeActions(raw.allowed_actions),
+    requires_user_confirmation: normalizeActions(raw.requires_user_confirmation),
+    blocked_without_user_override: normalizeActions(raw.blocked_without_user_override)
+  }
+  // If the model returned nothing usable, fall back to the safe default.
+  if (contract.allowed_actions.length === 0) return fallbackContract(clean)
+  return contract
 }
 
 /**
@@ -43,16 +63,7 @@ export async function generateContract(cfg: LlmConfig, prompt: string): Promise<
       CONTRACT_SYSTEM,
       `User request:\n"""\n${clean}\n"""`
     )
-    const goal = typeof raw.goal === 'string' && raw.goal.trim() ? raw.goal.trim() : clean
-    const contract: TaskContract = {
-      goal: goal.slice(0, 400),
-      allowed_actions: normalizeActions(raw.allowed_actions),
-      requires_user_confirmation: normalizeActions(raw.requires_user_confirmation),
-      blocked_without_user_override: normalizeActions(raw.blocked_without_user_override)
-    }
-    // If the model returned nothing usable, fall back to the safe default.
-    if (contract.allowed_actions.length === 0) return fallbackContract(clean)
-    return contract
+    return parseContract(raw, clean)
   } catch (err) {
     console.error('[contract] generation failed, using safe default:', err)
     return fallbackContract(clean)
@@ -60,7 +71,7 @@ export async function generateContract(cfg: LlmConfig, prompt: string): Promise<
 }
 
 /** Conservative research-oriented default used when no model is configured. */
-function fallbackContract(prompt: string): TaskContract {
+export function fallbackContract(prompt: string): TaskContract {
   return {
     goal: prompt.trim().slice(0, 300) || 'Assist with the requested browser task',
     allowed_actions: ['open', 'read', 'search', 'scroll', 'click'],

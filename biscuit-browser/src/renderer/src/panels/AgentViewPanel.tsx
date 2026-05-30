@@ -59,7 +59,20 @@ export function AgentViewPanel(): JSX.Element {
             <span>
               {view.generation} · {view.elements.length} elements{view.truncated ? ' · truncated' : ''}
             </span>
+            {view.context && (
+              <>
+                <span className="k">Coverage</span>
+                <span>
+                  {view.context.frames.sameOrigin} same-origin / {view.context.frames.crossOrigin} cross-origin
+                  frame(s) · {view.context.shadowRoots} shadow root(s)
+                </span>
+              </>
+            )}
           </div>
+
+          {view.context && view.context.notes.length > 0 && (
+            <p className="muted">⚠ {view.context.notes.join(' · ')}</p>
+          )}
 
           {view.headings.length > 0 && (
             <>
@@ -82,7 +95,10 @@ export function AgentViewPanel(): JSX.Element {
                 {el.name ? ` "${el.name}"` : ''}
                 {el.type ? ` [${el.type}]` : ''}
                 {el.sensitive ? <span className="sensitive"> SENSITIVE</span> : ''}
+                {el.via ? <span className="muted"> in:{el.via}</span> : ''}
                 {!el.state.inViewport ? <span className="muted"> offscreen</span> : ''}
+                {el.state.covered ? <span className="muted"> covered</span> : ''}
+                {!el.state.enabled ? <span className="muted"> disabled</span> : ''}
               </div>
             ))}
           </div>

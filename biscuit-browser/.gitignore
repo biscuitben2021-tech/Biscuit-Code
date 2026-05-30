@@ -2,5 +2,12 @@ node_modules/
 out/
 release/
 dist/
+coverage/
 *.log
+
+# Local npm cache used to work around broken global caches; never commit.
+.npm-cache/
+
+# macOS Finder metadata — never commit, anywhere in the tree.
 .DS_Store
+**/.DS_Store

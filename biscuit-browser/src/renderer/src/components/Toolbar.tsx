@@ -5,9 +5,13 @@ interface Props {
   activeTab: TabState | null
   mode: PermissionMode
   runtime: RuntimeUpdate | null
+  expertMode: boolean
+  /** Begin arming Bypass — the parent shows the typed-confirmation modal (or a
+   *  notice if expert mode is off). */
+  onArmBypass: () => void
 }
 
-export function Toolbar({ activeTab, mode, runtime }: Props): JSX.Element {
+export function Toolbar({ activeTab, mode, runtime, expertMode, onArmBypass }: Props): JSX.Element {
   const [address, setAddress] = useState('')
   const [editing, setEditing] = useState(false)
 
@@ -70,9 +74,19 @@ export function Toolbar({ activeTab, mode, runtime }: Props): JSX.Element {
         className={`mode-chip mode-${mode}`}
         value={mode}
         title={describeMode(mode)}
-        onChange={(e) => void window.biscuit.mode.set(e.target.value as PermissionMode)}
+        onChange={(e) => {
+          const next = e.target.value as PermissionMode
+          if (next === mode) return
+          // Bypass is never set directly from here — it requires expert mode and
+          // a typed confirmation, both handled by the parent.
+          if (next === 'bypass') {
+            onArmBypass()
+            return
+          }
+          void window.biscuit.mode.set(next)
+        }}
       >
-        {PERMISSION_MODES.map((m) => (
+        {PERMISSION_MODES.filter((m) => m !== 'bypass' || expertMode || mode === 'bypass').map((m) => (
           <option key={m} value={m}>
             {m}
           </option>

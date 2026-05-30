@@ -1,7 +1,9 @@
 import { BrowserWindow, WebContentsView, session } from 'electron'
-import type { AgentView, TabState } from '@shared/types'
+import type { AgentView, PageSignature, TabState } from '@shared/types'
 import type { ViewBounds } from '@shared/ipc'
+import { normalizeUrl } from '@shared/url'
 import { runExtract } from './actions/browserActions'
+import { buildSignatureScript, type RawSignature } from './agent-view/signature'
 
 const DEFAULT_HOME = 'https://duckduckgo.com/'
 // Dedicated, persistent session for browsed pages — fully separate from the
@@ -187,13 +189,26 @@ export class TabManager {
       headings: raw.headings,
       elements: raw.elements as AgentView['elements'],
       text: raw.text,
-      truncated: raw.truncated
+      truncated: raw.truncated,
+      context: raw.context
     }
   }
 
   /** Alias of getAgentView — re-extracts and expires prior @refs. */
   refreshAgentView(id?: string): Promise<AgentView> {
     return this.getAgentView(id)
+  }
+
+  /**
+   * Capture a lightweight page fingerprint for the verification layer. Unlike
+   * getAgentView this does NOT re-tag elements or bump the generation, so it is
+   * safe to call before/after an action without invalidating live @refs.
+   */
+  async getSignature(id?: string): Promise<PageSignature> {
+    const tab = this.resolve(id)
+    if (!tab) throw new Error('no active tab')
+    const raw = (await tab.view.webContents.executeJavaScript(buildSignatureScript(), true)) as RawSignature
+    return { ...raw, capturedAt: Date.now() }
   }
 
   // ── Internal ──────────────────────────────────────────────────────────────
@@ -238,29 +253,4 @@ export class TabManager {
     }
     this.tabs = []
   }
-}
-
-function search(query: string): string {
-  return `https://duckduckgo.com/?q=${encodeURIComponent(query)}`
-}
-
-/**
- * Turn user/address-bar or agent input into a loadable URL. Only http(s) and
- * about:blank are navigable; schemes that can read local files or run script
- * (file:, data:, javascript:, blob:, chrome:, view-source:, other about:) are
- * routed to a web search instead — neither the agent nor the address bar can
- * reach the local filesystem.
- */
-function normalizeUrl(input: string): string {
-  const trimmed = input.trim()
-  if (trimmed === 'about:blank') return trimmed
-  if (/^(file|data|javascript|blob|chrome|about|view-source):/i.test(trimmed)) {
-    return search(trimmed)
-  }
-  if (/^https?:\/\//i.test(trimmed)) return trimmed
-  // Schemeless: treat domain-like input as https, otherwise search.
-  if (!trimmed.includes(' ') && /^[^\s]+\.[^\s]{2,}(\/.*)?$/.test(trimmed)) {
-    return `https://${trimmed}`
-  }
-  return search(trimmed)
 }

@@ -4,6 +4,7 @@ import type {
   AgentView,
   GateResult,
   LogEntry,
+  PageSignature,
   PermissionMode,
   RuntimeUpdate,
   TaskContract
@@ -11,7 +12,8 @@ import type {
 import type { TabManager } from '../tabs'
 import type { LlmConfig } from './llm'
 import { llmJson } from './llm'
-import { evaluate } from './actionGate'
+import { classify, evaluate } from './actionGate'
+import { shouldVerify, verifyAction } from './verify'
 import { EXECUTOR_SYSTEM } from './prompts'
 
 const MAX_STEPS = 16
@@ -23,6 +25,8 @@ export interface RuntimeDeps {
   getMode: () => PermissionMode
   getContract: () => TaskContract | null
   execute: (proposal: ActionProposal) => Promise<ActionResult>
+  /** Capture a lightweight page fingerprint for the verification layer. */
+  getSignature: () => Promise<PageSignature>
   /** Resolve true if the user approves a gated action, false otherwise. */
   requestApproval: (proposal: ActionProposal, gate: GateResult) => Promise<boolean>
   /** Cancel any pending approval (used by emergency stop). */
@@ -118,13 +122,55 @@ export class AgentRuntime {
             }
           }
         } else {
-          this.deps.log({ type: 'gate', message: 'bypass mode (no prompt)', action: proposal.kind, decision: 'allow', risk: 'low', mode })
+          // Bypass skips enforcement but the audit trail must still record the
+          // action's TRUE risk, not a flat low/allow.
+          const c = classify(proposal, view)
+          this.deps.log({
+            type: 'gate',
+            message: `bypass: ran without prompt (would be ${c.risk}-risk${c.sensitive ? ', sensitive' : ''})`,
+            action: proposal.kind,
+            decision: 'allow',
+            risk: c.risk,
+            mode
+          })
         }
 
         // ── Execute ──
+        // Capture a "before" fingerprint for verifiable actions so we can tell
+        // afterwards whether the action actually did anything / failed.
+        const verify = shouldVerify(proposal.kind)
+        let before: PageSignature | null = null
+        if (verify) {
+          try {
+            before = await this.deps.getSignature()
+          } catch {
+            before = null
+          }
+        }
+
         const result = await this.deps.execute(proposal)
         this.deps.log({ type: 'action', message: result.detail, action: proposal.kind })
-        recent.push(`step ${step}: ${describe(proposal)} -> ${result.ok ? 'ok' : 'FAIL'}: ${result.detail}`)
+        let line = `step ${step}: ${describe(proposal)} -> ${result.ok ? 'ok' : 'FAIL'}: ${result.detail}`
+
+        // ── Verify ── best-effort; only when the action reported success.
+        if (verify && result.ok && before) {
+          try {
+            await this.settle()
+            const after = await this.deps.getSignature()
+            const verdict = verifyAction(before, after, proposal)
+            this.deps.log({
+              type: 'runtime',
+              message: `${verdict.summary}${verdict.warnings.length ? ' — ' + verdict.warnings.join('; ') : ''}`
+            })
+            line += ` | ${verdict.summary}`
+            for (const w of verdict.warnings) line += `\n    ⚠ ${w}`
+            if (!verdict.ok || verdict.warnings.length) this.deps.emit({ status: 'running', message: verdict.summary })
+          } catch {
+            /* verification is best-effort — never block the loop on it */
+          }
+        }
+
+        recent.push(line)
         if (recent.length > 8) recent.shift()
         this.deps.emit({ status: 'running', message: result.detail })
       }
@@ -167,6 +213,15 @@ export class AgentRuntime {
       tick()
     })
   }
+
+  /** Let the page settle after an action before re-measuring it for verification. */
+  private settle(): Promise<void> {
+    return new Promise((resolve) => {
+      // A short fixed pause lets click/input handlers + microtasks run, then we
+      // wait out any navigation/loading the action may have triggered.
+      setTimeout(() => void this.waitIdle(1500).then(resolve), 300)
+    })
+  }
 }
 
 function describe(p: ActionProposal): string {
@@ -184,7 +239,7 @@ function describe(p: ActionProposal): string {
   }
 }
 
-function normalizeProposal(raw: Partial<ActionProposal> | null): ActionProposal {
+export function normalizeProposal(raw: Partial<ActionProposal> | null): ActionProposal {
   const kind = raw && typeof raw.kind === 'string' ? (raw.kind as ActionProposal['kind']) : 'ask'
   if (!ACTION_KINDS.includes(kind)) {
     return { kind: 'ask', message: `Model returned unknown action "${kind}".` }
@@ -217,12 +272,17 @@ function compactAgentView(view: AgentView): string {
     if (el.type) bits.push(`type=${el.type}`)
     if (el.href) bits.push(`href=${el.href.slice(0, 80)}`)
     if (el.sensitive) bits.push('SENSITIVE')
+    if (el.via) bits.push(`in=${el.via}`)
     if (!el.state.inViewport) bits.push('offscreen')
+    if (el.state.covered) bits.push('covered')
     if (!el.state.enabled) bits.push('disabled')
     lines.push(`  ${bits.join(' ')}`)
   }
   const text = view.text.slice(0, 2500)
   lines.push(`visible_text (truncated):\n${text}`)
   if (view.truncated) lines.push('(snapshot truncated)')
+  if (view.context && view.context.notes.length) {
+    lines.push(`coverage_notes: ${view.context.notes.join('; ')}`)
+  }
   return lines.join('\n')
 }

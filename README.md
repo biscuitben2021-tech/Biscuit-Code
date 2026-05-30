@@ -212,17 +212,22 @@ Core chat, file tools, shell commands, memory, evals, and MCP are designed for m
 ## Biscuit Browser (experimental, separate app)
 
 `biscuit-browser/` contains **Biscuit Browser** — an AI-native Chromium browser
-(Electron + React + TypeScript) for macOS and Windows. It is a self-contained
-app added alongside this Rust CLI "like a plugin"; it does not modify the CLI.
-It has tabs/address bar/settings plus an AI side panel, and an agent that
-operates pages via a structured **Agent View** (`@e` refs, not raw HTML),
-gated by a per-task contract and permission modes.
+(Electron + React + TypeScript) for macOS, Windows, and Linux. It is a
+self-contained app added alongside this Rust CLI "like a plugin"; it does not
+modify the CLI. It has tabs/address bar/settings plus an AI side panel, and an
+agent that operates pages via a structured **Agent View** (`@e` refs, not raw
+HTML or screenshots), gated by a per-task **contract**, a context-aware
+**Action Gate**, and permission modes — with a verification layer that checks
+each action actually took effect. The safety layer is unit-tested in CI
+(Linux/macOS/Windows).
 
 ```sh
 cd biscuit-browser
 npm install
-npm run dev
+npm run dev      # or: npm run typecheck && npm test && npm run build
 ```
 
 It is built to connect to this Rust `biscuits` CLI later as a model/agent
-backend. See [`biscuit-browser/README.md`](biscuit-browser/README.md).
+backend. See [`biscuit-browser/README.md`](biscuit-browser/README.md),
+[`CONTRIBUTING.md`](biscuit-browser/CONTRIBUTING.md), and
+[`SECURITY.md`](biscuit-browser/SECURITY.md).

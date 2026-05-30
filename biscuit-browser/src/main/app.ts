@@ -62,6 +62,7 @@ export class App {
       getMode: () => this.mode,
       getContract: () => (this.contract.status === 'locked' ? this.contract.contract : null),
       execute: (proposal) => executeProposal(this.tabs, proposal),
+      getSignature: () => this.tabs.getSignature(),
       requestApproval: (proposal, gate) => this.requestApproval(proposal, gate),
       cancelApprovals: () => this.cancelApprovals(),
       log: (entry) => void this.log.add(entry),
@@ -82,6 +83,14 @@ export class App {
   }
 
   private setMode(mode: PermissionMode): void {
+    // Defense in depth: Bypass can only be armed when expert mode is enabled.
+    // The renderer also gates this behind a typed-confirmation modal, but the
+    // main process is the real authority.
+    if (mode === 'bypass' && !this.settings.isExpertMode()) {
+      this.log.add({ type: 'system', message: 'refused to enter Bypass mode: expert mode is not enabled' })
+      this.send(IPC.EVT_MODE_CHANGED, this.mode) // re-affirm the real mode to the UI
+      return
+    }
     this.mode = mode
     this.log.add({ type: 'system', mode, message: `permission mode set to ${mode}` })
     this.send(IPC.EVT_MODE_CHANGED, mode)
@@ -244,6 +253,13 @@ export class App {
       if (!this.runtime.isRunning() && saved.defaultMode !== prevDefault) {
         this.setMode(saved.defaultMode)
       }
+      // Revoking expert mode must immediately disarm any active Bypass session,
+      // even mid-task — the runtime reads the mode each step, and dropping to
+      // Assisted is always the safer direction.
+      if (!saved.expertMode && this.mode === 'bypass') {
+        this.log.add({ type: 'system', message: 'expert mode disabled — dropping Bypass back to Assisted' })
+        this.setMode('assisted')
+      }
       return saved
     })
 
@@ -252,6 +268,9 @@ export class App {
     h(IPC.RUNTIME_STOP, () => {
       this.runtime.stop()
       this.cancelApprovals()
+      // A panic-stop should also drop out of the riskiest mode. Bypass must be
+      // re-armed deliberately afterwards.
+      if (this.mode === 'bypass') this.setMode('assisted')
       return true
     })
   }

@@ -5,7 +5,7 @@ import { useEffect, useRef } from 'react'
  * rendered by the main process in a native view layered exactly over this box.
  * We measure this element and report its bounds so main can position the view.
  */
-export function BrowserViewport({ hasTab }: { hasTab: boolean }): JSX.Element {
+export function BrowserViewport({ hasTab, hidden }: { hasTab: boolean; hidden?: boolean }): JSX.Element {
   const ref = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -13,6 +13,13 @@ export function BrowserViewport({ hasTab }: { hasTab: boolean }): JSX.Element {
     if (!el) return
 
     const report = (): void => {
+      // The native WebContentsView paints ABOVE the DOM, so it would occlude a
+      // modal/overlay. When `hidden`, collapse it to zero size so DOM dialogs
+      // are visible.
+      if (hidden) {
+        void window.biscuit.view.setBounds({ x: 0, y: 0, width: 0, height: 0 })
+        return
+      }
       const r = el.getBoundingClientRect()
       void window.biscuit.view.setBounds({
         x: Math.round(r.left),
@@ -33,7 +40,7 @@ export function BrowserViewport({ hasTab }: { hasTab: boolean }): JSX.Element {
       window.removeEventListener('resize', report)
       window.clearTimeout(t)
     }
-  }, [])
+  }, [hidden])
 
   return (
     <div className="viewport" ref={ref}>

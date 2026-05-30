@@ -16,6 +16,7 @@ export function SettingsPanel(): JSX.Element {
   const [model, setModel] = useState('')
   const [baseUrl, setBaseUrl] = useState('')
   const [defaultMode, setDefaultMode] = useState<PermissionMode>('assisted')
+  const [expertMode, setExpertMode] = useState(false)
   const [apiKey, setApiKey] = useState('')
   const [saved, setSaved] = useState('')
 
@@ -25,7 +26,8 @@ export function SettingsPanel(): JSX.Element {
     setModel(settings.model)
     setBaseUrl(settings.baseUrl)
     setDefaultMode(settings.defaultMode)
-  }, [settings?.provider, settings?.model, settings?.baseUrl, settings?.defaultMode])
+    setExpertMode(settings.expertMode)
+  }, [settings?.provider, settings?.model, settings?.baseUrl, settings?.defaultMode, settings?.expertMode])
 
   const onProvider = (p: LlmProvider): void => {
     setProvider(p)
@@ -40,6 +42,7 @@ export function SettingsPanel(): JSX.Element {
       model: model.trim(),
       baseUrl: baseUrl.trim(),
       defaultMode,
+      expertMode,
       apiKey: apiKey.length ? apiKey : undefined // omitted = keep existing
     })
     patchState({ settings: result })
@@ -88,12 +91,25 @@ export function SettingsPanel(): JSX.Element {
       <div className="field">
         <label>Default permission mode</label>
         <select value={defaultMode} onChange={(e) => setDefaultMode(e.target.value as PermissionMode)}>
-          {PERMISSION_MODES.map((m) => (
+          {/* Bypass can never be a saved default — it must be armed per session. */}
+          {PERMISSION_MODES.filter((m) => m !== 'bypass').map((m) => (
             <option key={m} value={m}>
               {m} — {describeMode(m)}
             </option>
           ))}
         </select>
+      </div>
+
+      <div className="field">
+        <label className="checkbox">
+          <input type="checkbox" checked={expertMode} onChange={(e) => setExpertMode(e.target.checked)} />
+          <span>Expert mode — unlock Bypass</span>
+        </label>
+        <span className="muted">
+          Bypass lets the agent act with no approvals and no Task Contract. Enabling expert mode only
+          unlocks it; arming Bypass still requires a typed confirmation each session, and the emergency
+          Stop drops back to Assisted.
+        </span>
       </div>
 
       <div className="row">

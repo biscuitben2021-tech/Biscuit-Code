@@ -2,4 +2,10 @@
 /.biscuits/
 /.terminal_ai_agent/
 /biscuit/
+
+# macOS Finder metadata — never commit, anywhere in the tree.
 .DS_Store
+**/.DS_Store
+
+# Zip archives (e.g. biscuit-browser.zip) are build artifacts, never committed.
+*.zip

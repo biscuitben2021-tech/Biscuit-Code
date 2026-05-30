@@ -1,11 +1,35 @@
 {
   "name": "biscuit-browser",
   "version": "0.1.0",
-  "description": "Biscuit Browser — an AI-native Chromium browser (Electron + React + TypeScript) with an Agent View engine, Task Contracts, and a permissioned Action Gate.",
+  "description": "An AI-native Chromium browser (Electron + React + TypeScript): an agent operates the page through a structured Agent View, gated by a per-task contract and a permissioned Action Gate.",
+  "//private": "This is a desktop app, not an npm library — `private: true` is intentional and prevents an accidental `npm publish`. The project is open source; see `repository`/`homepage`.",
+  "private": true,
   "main": "./out/main/index.js",
   "author": "Biscuits",
   "license": "MIT",
-  "private": true,
+  "homepage": "https://github.com/biscuitben2021-tech/Biscuit-Code/tree/main/biscuit-browser#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/biscuitben2021-tech/Biscuit-Code.git",
+    "directory": "biscuit-browser"
+  },
+  "bugs": {
+    "url": "https://github.com/biscuitben2021-tech/Biscuit-Code/issues"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "browser",
+    "electron",
+    "automation",
+    "web-agent",
+    "llm",
+    "accessibility-tree",
+    "safety"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "dev": "electron-vite dev",
     "start": "electron-vite preview",
@@ -13,6 +37,8 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "package:mac": "electron-vite build && electron-builder --mac",
     "package:win": "electron-vite build && electron-builder --win"
   },
@@ -25,9 +51,11 @@
     "electron": "^31.3.0",
     "electron-builder": "^24.13.3",
     "electron-vite": "^2.3.0",
+    "jsdom": "^25.0.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "typescript": "^5.5.3",
-    "vite": "^5.3.4"
+    "vite": "^5.3.4",
+    "vitest": "^2.1.9"
   }
 }

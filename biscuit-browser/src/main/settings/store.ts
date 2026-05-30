@@ -8,6 +8,7 @@ interface PersistedSettings {
   model: string
   baseUrl: string
   defaultMode: PermissionMode
+  expertMode: boolean
   /** Base64 of an encrypted API key (via Electron safeStorage), or empty. */
   apiKeyEnc: string
 }
@@ -17,7 +18,16 @@ const DEFAULTS: PersistedSettings = {
   model: 'gpt-4o-mini',
   baseUrl: 'https://api.openai.com/v1',
   defaultMode: 'assisted',
+  expertMode: false,
   apiKeyEnc: ''
+}
+
+/**
+ * Bypass is never a valid saved default — it must be re-armed each session via
+ * an explicit typed confirmation. Coerce any attempt to persist it.
+ */
+function safeDefaultMode(mode: PermissionMode): PermissionMode {
+  return mode === 'bypass' ? 'assisted' : mode
 }
 
 /**
@@ -38,7 +48,10 @@ export class SettingsStore {
     try {
       if (existsSync(this.file)) {
         const raw = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<PersistedSettings>
-        return { ...DEFAULTS, ...raw }
+        const merged = { ...DEFAULTS, ...raw }
+        // Never boot into Bypass, even if an old/edited file asks for it.
+        merged.defaultMode = safeDefaultMode(merged.defaultMode)
+        return merged
       }
     } catch (err) {
       console.error('[settings] failed to load, using defaults:', err)
@@ -61,15 +74,22 @@ export class SettingsStore {
       model: this.data.model,
       baseUrl: this.data.baseUrl,
       defaultMode: this.data.defaultMode,
+      expertMode: this.data.expertMode,
       hasApiKey: this.data.apiKeyEnc.length > 0
     }
+  }
+
+  /** Whether Bypass mode may be armed this session. */
+  isExpertMode(): boolean {
+    return this.data.expertMode
   }
 
   save(update: SettingsUpdate): Settings {
     this.data.provider = update.provider
     this.data.model = update.model
     this.data.baseUrl = update.baseUrl
-    this.data.defaultMode = update.defaultMode
+    this.data.defaultMode = safeDefaultMode(update.defaultMode)
+    this.data.expertMode = update.expertMode === true
     if (update.apiKey !== undefined) {
       const key = update.apiKey.trim()
       if (key.length === 0) {

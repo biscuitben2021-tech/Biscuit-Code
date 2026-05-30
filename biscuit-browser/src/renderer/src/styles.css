@@ -66,10 +66,15 @@ textarea {
 }
 
 .app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.app-body {
+  flex: 1;
+  min-height: 0;
   display: grid;
   grid-template-columns: 1fr var(--panel-w);
-  grid-template-rows: 100%;
-  height: 100%;
 }
 
 .browser {
@@ -382,4 +387,128 @@ textarea {
   max-width: 100%;
   border: 1px solid var(--border);
   border-radius: 6px;
+}
+
+/* ── Danger button + Bypass banner + notice + modal ──────────────────────── */
+.btn-danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #1b1b1f;
+  font-weight: 700;
+}
+.btn-danger:hover {
+  background: #ff7676;
+}
+
+.bypass-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  background: repeating-linear-gradient(45deg, #5a1f1f, #5a1f1f 12px, #6e2525 12px, #6e2525 24px);
+  border-bottom: 2px solid var(--danger);
+  color: #fff;
+  font-size: 12px;
+}
+.bypass-text {
+  flex: 1;
+}
+.bypass-text b {
+  color: var(--warn);
+  letter-spacing: 0.04em;
+}
+.bypass-actions {
+  display: flex;
+  gap: 6px;
+}
+.bypass-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--danger);
+  box-shadow: 0 0 0 0 rgba(255, 92, 92, 0.7);
+  animation: bypass-pulse 1.4s infinite;
+}
+@keyframes bypass-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 92, 92, 0.7);
+  }
+  70% {
+    box-shadow: 0 0 0 8px rgba(255, 92, 92, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 92, 92, 0);
+  }
+}
+
+.notice-bar {
+  padding: 6px 12px;
+  background: #3a2f12;
+  color: var(--warn);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.modal {
+  width: 460px;
+  max-width: 92vw;
+  max-height: 88vh;
+  overflow: auto;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.modal.danger {
+  border-color: var(--danger);
+}
+.modal-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--danger);
+  margin-bottom: 8px;
+}
+.modal p {
+  margin: 6px 0;
+  line-height: 1.45;
+}
+.modal-list {
+  margin: 6px 0 6px 18px;
+  color: var(--muted);
+}
+.modal-list li {
+  margin: 2px 0;
+}
+.modal code {
+  background: var(--bg);
+  padding: 1px 6px;
+  border-radius: 4px;
+  color: var(--accent);
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+}
+.modal input {
+  width: 100%;
+}
+
+.field label.checkbox {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+.field label.checkbox input {
+  width: auto;
 }

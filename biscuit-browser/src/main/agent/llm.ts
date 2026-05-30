@@ -42,7 +42,7 @@ export async function llmJson<T>(cfg: LlmConfig, system: string, user: string): 
 }
 
 /** Find the first balanced JSON object/array in arbitrary model text. */
-function extractJson(text: string): unknown {
+export function extractJson(text: string): unknown {
   const trimmed = text.trim()
   try {
     return JSON.parse(trimmed)
