@@ -22,11 +22,18 @@ describe('browserActions page-world scripts', () => {
     expect(m.script()).not.toMatch(/el\.value/)
   })
 
-  it('clickRef validates the element\'s own document generation (frame-aware)', async () => {
+  it("clickRef validates the element's own document generation (frame-aware)", async () => {
     const m = mockWc()
     await clickRef(m.wc as never, '@e1', 7)
     expect(m.script()).toContain('ownerDocument')
     expect(m.script()).toContain('biscuitFind')
+  })
+
+  it('clickRef includes a covered-element pre-check', async () => {
+    const m = mockWc()
+    await clickRef(m.wc as never, '@e1', 1)
+    expect(m.script()).toContain('elementFromPoint')
+    expect(m.script()).toContain('is covered by')
   })
 
   it('typeRef reports only the typed length, not the typed text, in its detail', async () => {

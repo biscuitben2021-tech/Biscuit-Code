@@ -47,6 +47,9 @@ export const IPC = {
   // Chat
   CHAT_SEND: 'chat:send',
 
+  // Demo mode (no API key): scripted contract + gate decisions
+  DEMO_RUN: 'demo:run',
+
   // ── Events (main -> renderer) ──
   EVT_TABS_CHANGED: 'evt:tabsChanged',
   EVT_CONTRACT_CHANGED: 'evt:contractChanged',

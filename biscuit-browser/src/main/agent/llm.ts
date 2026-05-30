@@ -142,9 +142,13 @@ async function googleComplete(cfg: LlmConfig, system: string, user: string): Pro
   if (!cfg.apiKey) throw new LlmError('Google requires an API key. Open Settings.')
   const model = cfg.model.replace(/^models\//, '')
   const url = `${cleanBase(cfg.baseUrl)}/models/${model}:generateContent?key=${cfg.apiKey}`
-  const data = await postJson(url, { 'Content-Type': 'application/json' }, {
-    systemInstruction: { parts: [{ text: system }] },
-    contents: [{ role: 'user', parts: [{ text: user }] }]
-  })
+  const data = await postJson(
+    url,
+    { 'Content-Type': 'application/json' },
+    {
+      systemInstruction: { parts: [{ text: system }] },
+      contents: [{ role: 'user', parts: [{ text: user }] }]
+    }
+  )
   return data?.candidates?.[0]?.content?.parts?.[0]?.text ?? ''
 }

@@ -4,6 +4,7 @@ import { AgentViewPanel } from '../panels/AgentViewPanel'
 import { ActionLogPanel } from '../panels/ActionLogPanel'
 import { ApprovalsPanel } from '../panels/ApprovalsPanel'
 import { SettingsPanel } from '../panels/SettingsPanel'
+import { StatusBar } from './StatusBar'
 
 export type PanelKey = 'chat' | 'contract' | 'agentView' | 'log' | 'approvals' | 'settings'
 
@@ -25,6 +26,7 @@ interface Props {
 export function SidePanel({ active, onSelect, approvalBadge }: Props): JSX.Element {
   return (
     <div className="panel">
+      <StatusBar />
       <div className="panel-tabs">
         {TABS.map(([key, label]) => (
           <button key={key} className={active === key ? 'active' : ''} onClick={() => onSelect(key)}>

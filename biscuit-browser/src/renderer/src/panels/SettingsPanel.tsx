@@ -4,8 +4,16 @@ import { patchState, useBiscuit } from '../state/store'
 
 const PRESETS: Record<LlmProvider, { label: string; baseUrl: string; model: string }> = {
   openai: { label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
-  anthropic: { label: 'Anthropic', baseUrl: 'https://api.anthropic.com/v1', model: 'claude-sonnet-4-20250514' },
-  google: { label: 'Google Gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta', model: 'gemini-2.0-flash' },
+  anthropic: {
+    label: 'Anthropic',
+    baseUrl: 'https://api.anthropic.com/v1',
+    model: 'claude-sonnet-4-20250514'
+  },
+  google: {
+    label: 'Google Gemini',
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+    model: 'gemini-2.0-flash'
+  },
   openai_compatible: { label: 'OpenAI-compatible', baseUrl: 'http://localhost:8000/v1', model: '' },
   lmstudio: { label: 'LM Studio', baseUrl: 'http://localhost:1234/v1', model: '' }
 }
@@ -82,10 +90,21 @@ export function SettingsPanel(): JSX.Element {
           placeholder={settings?.hasApiKey ? '•••••• (leave blank to keep)' : 'paste API key'}
           onChange={(e) => setApiKey(e.target.value)}
         />
-        <span className="muted">
-          Stored locally and encrypted with the OS keychain. Never sent to web pages; used only by the
-          main process for model calls.
-        </span>
+        {settings && !settings.secureStorageAvailable ? (
+          <span className="warn-text">
+            ⚠ Your OS keychain is unavailable, so the key will <b>not</b> be written to disk. It is kept in
+            memory for this session only and you'll need to re-enter it after restarting. Biscuit never stores
+            an API key in plaintext.
+          </span>
+        ) : (
+          <span className="muted">
+            Stored locally and encrypted with the OS keychain. Never sent to web pages; used only by the main
+            process for model calls.
+          </span>
+        )}
+        {settings?.keyStorage === 'session' && (
+          <span className="muted">Current key storage: session-only (in memory).</span>
+        )}
       </div>
 
       <div className="field">
@@ -106,9 +125,9 @@ export function SettingsPanel(): JSX.Element {
           <span>Expert mode — unlock Bypass</span>
         </label>
         <span className="muted">
-          Bypass lets the agent act with no approvals and no Task Contract. Enabling expert mode only
-          unlocks it; arming Bypass still requires a typed confirmation each session, and the emergency
-          Stop drops back to Assisted.
+          Bypass lets the agent act with no approvals and no Task Contract. Enabling expert mode only unlocks
+          it; arming Bypass still requires a typed confirmation each session, and the emergency Stop drops
+          back to Assisted.
         </span>
       </div>
 
@@ -118,8 +137,8 @@ export function SettingsPanel(): JSX.Element {
       </div>
 
       <p className="muted">
-        TODO(phase-later): connect to the Rust “biscuits” CLI as an alternative model backend (shared
-        provider config). See README.
+        TODO(phase-later): connect to the Rust “biscuits” CLI as an alternative model backend (shared provider
+        config). See README.
       </p>
     </div>
   )

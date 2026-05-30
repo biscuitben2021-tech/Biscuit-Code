@@ -1,11 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import type {
-  ActionProposal,
-  AgentElement,
-  AgentView,
-  PermissionMode,
-  TaskContract
-} from '@shared/types'
+import type { ActionProposal, AgentElement, AgentView, PermissionMode, TaskContract } from '@shared/types'
 import { analyzePageContext, classify, evaluate } from '../src/main/agent/actionGate'
 
 // ── builders ──────────────────────────────────────────────────────────────
@@ -66,7 +60,9 @@ function gate(
 // ── page context ────────────────────────────────────────────────────────────
 describe('analyzePageContext', () => {
   it('detects a payment context', () => {
-    const ctx = analyzePageContext(view([], { url: 'https://shop.test/checkout', text: 'Order summary — place order' }))
+    const ctx = analyzePageContext(
+      view([], { url: 'https://shop.test/checkout', text: 'Order summary — place order' })
+    )
     expect(ctx.kinds).toContain('payment')
     expect(ctx.sensitive).toBe(true)
   })
@@ -82,14 +78,19 @@ describe('analyzePageContext', () => {
   })
 
   it('treats a neutral docs page as non-sensitive', () => {
-    const ctx = analyzePageContext(view([], { url: 'https://doc.rust-lang.org/', text: 'The Rust Programming Language' }))
+    const ctx = analyzePageContext(
+      view([], { url: 'https://doc.rust-lang.org/', text: 'The Rust Programming Language' })
+    )
     expect(ctx.sensitive).toBe(false)
     expect(ctx.kinds).toEqual([])
   })
 
   it('does not over-match incidental words ("pay attention", "forgot password")', () => {
     const ctx = analyzePageContext(
-      view([], { title: 'Tips', text: 'Pay attention to detail. If you forgot password hints, write them down.' })
+      view([], {
+        title: 'Tips',
+        text: 'Pay attention to detail. If you forgot password hints, write them down.'
+      })
     )
     expect(ctx.sensitive).toBe(false)
   })
@@ -114,7 +115,9 @@ describe('classify', () => {
   })
 
   it('classifies a plain link click as low-risk', () => {
-    const v = view([el({ ref: '@e1', role: 'link', tag: 'a', name: 'Documentation', href: 'https://x' })])
+    const v = view([
+      el({ ref: '@e1', role: 'link', tag: 'a', name: 'Documentation', href: 'https://example.com/docs' })
+    ])
     const c = classify({ kind: 'clickRef', ref: '@e1' }, v)
     expect(c.contractAction).toBe('click')
     expect(c.risk).toBe('low')
@@ -133,7 +136,10 @@ describe('classify', () => {
   })
 
   it('escalates a vague "Continue" inside a payment context', () => {
-    const v = view([el({ ref: '@e1', name: 'Continue' })], { url: 'https://shop/checkout', text: 'place order — billing' })
+    const v = view([el({ ref: '@e1', name: 'Continue' })], {
+      url: 'https://shop/checkout',
+      text: 'place order — billing'
+    })
     const c = classify({ kind: 'clickRef', ref: '@e1' }, v)
     expect(c.contractAction).toBe('payment')
     expect(c.risk).toBe('high')
@@ -169,18 +175,60 @@ describe('classify', () => {
     expect(c.sensitive).toBe(true)
     expect(c.risk).toBe('high')
   })
+
+  it('flags a navigation link to an external domain as medium', () => {
+    const v = view(
+      [el({ ref: '@e1', role: 'link', tag: 'a', name: 'Sponsor', href: 'https://other.example/x' })],
+      {
+        url: 'https://mysite.test/page'
+      }
+    )
+    const c = classify({ kind: 'clickRef', ref: '@e1' }, v)
+    expect(c.contractAction).toBe('open')
+    expect(c.risk).toBe('medium')
+  })
+
+  it('keeps a same-domain navigation link low-risk', () => {
+    const v = view(
+      [el({ ref: '@e1', role: 'link', tag: 'a', name: 'Read more', href: 'https://mysite.test/next' })],
+      {
+        url: 'https://mysite.test/page'
+      }
+    )
+    const c = classify({ kind: 'clickRef', ref: '@e1' }, v)
+    expect(c.contractAction).toBe('click')
+    expect(c.risk).toBe('low')
+  })
+})
+
+describe('evaluate — external navigation', () => {
+  const extLink = view(
+    [el({ ref: '@e1', role: 'link', tag: 'a', name: 'Sponsor', href: 'https://other.example/x' })],
+    { url: 'https://mysite.test/page' }
+  )
+  it('asks in safe mode, allows in assisted/auto (medium-risk navigation)', () => {
+    expect(gate({ kind: 'clickRef', ref: '@e1' }, 'safe', extLink).decision).toBe('ask')
+    expect(gate({ kind: 'clickRef', ref: '@e1' }, 'assisted', extLink).decision).toBe('allow')
+    expect(gate({ kind: 'clickRef', ref: '@e1' }, 'auto', extLink).decision).toBe('allow')
+  })
 })
 
 // ── gate decisions ────────────────────────────────────────────────────────────
 describe('evaluate — contract enforcement', () => {
   it('blocks contract-blocked actions (Pay now under the default contract)', () => {
-    const v = view([el({ ref: '@e1', name: 'Pay now' })], { url: 'https://shop/checkout', text: 'place order' })
+    const v = view([el({ ref: '@e1', name: 'Pay now' })], {
+      url: 'https://shop/checkout',
+      text: 'place order'
+    })
     const r = gate({ kind: 'clickRef', ref: '@e1' }, 'auto', v)
     expect(r.decision).toBe('block')
   })
 
   it('blocks a vague "Continue" on a checkout page (mapped to payment)', () => {
-    const v = view([el({ ref: '@e1', name: 'Continue' })], { url: 'https://shop/checkout', text: 'order summary place order billing' })
+    const v = view([el({ ref: '@e1', name: 'Continue' })], {
+      url: 'https://shop/checkout',
+      text: 'order summary place order billing'
+    })
     expect(gate({ kind: 'clickRef', ref: '@e1' }, 'auto', v).decision).toBe('block')
   })
 
@@ -190,13 +238,22 @@ describe('evaluate — contract enforcement', () => {
   })
 
   it('asks when an action is not in allowed_actions', () => {
-    const onlyOpen: TaskContract = { goal: 'g', allowed_actions: ['open'], requires_user_confirmation: [], blocked_without_user_override: [] }
-    const v = view([el({ ref: '@e1', role: 'link', tag: 'a', name: 'docs', href: 'https://x' })])
+    const onlyOpen: TaskContract = {
+      goal: 'g',
+      allowed_actions: ['open'],
+      requires_user_confirmation: [],
+      blocked_without_user_override: []
+    }
+    const v = view([
+      el({ ref: '@e1', role: 'link', tag: 'a', name: 'docs', href: 'https://example.com/docs' })
+    ])
     expect(gate({ kind: 'clickRef', ref: '@e1' }, 'auto', v, onlyOpen).decision).toBe('ask')
   })
 
   it('allows an in-contract low-risk click', () => {
-    const v = view([el({ ref: '@e1', role: 'link', tag: 'a', name: 'docs', href: 'https://x' })])
+    const v = view([
+      el({ ref: '@e1', role: 'link', tag: 'a', name: 'docs', href: 'https://example.com/docs' })
+    ])
     expect(gate({ kind: 'clickRef', ref: '@e1' }, 'assisted', v).decision).toBe('allow')
   })
 
@@ -219,7 +276,13 @@ describe('evaluate — contract enforcement', () => {
   })
 
   it('blocks high-consequence verbs the old regex missed', () => {
-    for (const name of ['Authorize payment', 'Wire $10,000', 'Empty trash', 'Discard changes', 'Cancel subscription']) {
+    for (const name of [
+      'Authorize payment',
+      'Wire $10,000',
+      'Empty trash',
+      'Discard changes',
+      'Cancel subscription'
+    ]) {
       const v = view([el({ ref: '@e1', name })], { text: 'neutral page' })
       // Mapped to a blocked contract action by LABEL, regardless of page context.
       expect(gate({ kind: 'clickRef', ref: '@e1' }, 'auto', v).decision).toBe('block')
@@ -246,7 +309,9 @@ describe('evaluate — ref integrity', () => {
 
 describe('evaluate — mode/risk policy (permissive contract)', () => {
   it('safe asks for medium/high but allows low', () => {
-    const link = view([el({ ref: '@e1', role: 'link', tag: 'a', name: 'docs', href: 'https://x' })])
+    const link = view([
+      el({ ref: '@e1', role: 'link', tag: 'a', name: 'docs', href: 'https://example.com/docs' })
+    ])
     expect(gate({ kind: 'clickRef', ref: '@e1' }, 'safe', link, PERMISSIVE).decision).toBe('allow')
 
     const vague = view([el({ ref: '@e2', name: 'Continue' })], { text: 'neutral' })
@@ -279,7 +344,12 @@ describe('evaluate — bypass + sensitive', () => {
     // typeRef into a sensitive field maps to 'login'. Allow login so it passes
     // the contract checks — the only thing left to force an ask is the
     // sensitivity escalation itself.
-    const allowLogin: TaskContract = { goal: 'g', allowed_actions: ['type', 'login'], requires_user_confirmation: [], blocked_without_user_override: [] }
+    const allowLogin: TaskContract = {
+      goal: 'g',
+      allowed_actions: ['type', 'login'],
+      requires_user_confirmation: [],
+      blocked_without_user_override: []
+    }
     const r = gate({ kind: 'typeRef', ref: '@e1', text: 'x' }, 'auto', v, allowLogin)
     expect(r.decision).toBe('ask')
     expect(r.reason).toMatch(/sensitive/i)

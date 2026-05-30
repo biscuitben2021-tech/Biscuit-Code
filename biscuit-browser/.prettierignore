@@ -1,0 +1,9 @@
+node_modules/
+out/
+dist/
+release/
+coverage/
+.npm-cache/
+package-lock.json
+# Markdown/docs are hand-formatted; leave prose alone.
+*.md

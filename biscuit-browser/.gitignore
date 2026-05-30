@@ -5,6 +5,11 @@ dist/
 coverage/
 *.log
 
+# Local environment / secrets — never commit.
+.env
+.env.local
+.env.*.local
+
 # Local npm cache used to work around broken global caches; never commit.
 .npm-cache/
 

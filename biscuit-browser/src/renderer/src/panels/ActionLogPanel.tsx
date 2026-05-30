@@ -9,7 +9,9 @@ export function ActionLogPanel(): JSX.Element {
   const { logs } = useBiscuit()
   return (
     <div className="panel-scroll">
-      {logs.length === 0 && <p className="muted">No activity yet. Every gate decision and action is logged here.</p>}
+      {logs.length === 0 && (
+        <p className="muted">No activity yet. Every gate decision and action is logged here.</p>
+      )}
       {logs
         .slice()
         .reverse()

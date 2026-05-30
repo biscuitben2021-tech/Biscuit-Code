@@ -60,7 +60,8 @@ const RE = {
   payAction:
     /\b(pay|buy|purchase|checkout|place order|order now|add to cart|donate|subscribe|transfer|withdraw|authori[sz]e|wire|remit|payment|send money|send payment)\b/,
   sendAction: /\b(send|share|post|publish|tweet|message|invite|email|submit application)\b/,
-  authAction: /\b(sign ?in|log ?in|login|register|sign ?up|create account|continue with (google|apple|github|facebook|email))\b/,
+  authAction:
+    /\b(sign ?in|log ?in|login|register|sign ?up|create account|continue with (google|apple|github|facebook|email))\b/,
   submitAction: /\b(submit|confirm|place|complete|verify|apply now|save changes|approve|accept terms)\b/,
   vagueAction: /\b(continue|next|proceed|agree|accept|allow|ok|okay|done|finish|got it|apply|save|update)\b/
 } as const
@@ -100,22 +101,63 @@ function findElement(view: AgentView | null, ref?: string): AgentElement | undef
 function classifyClick(el: AgentElement | undefined, ctx: PageContext): Classification {
   const name = (el?.name ?? '').toLowerCase()
 
-  if (el?.sensitive) return { contractAction: 'submit', risk: 'high', sensitive: true, note: 'click on sensitive control' }
+  if (el?.sensitive)
+    return { contractAction: 'submit', risk: 'high', sensitive: true, note: 'click on sensitive control' }
 
-  if (RE.destructive.test(name)) return { contractAction: 'delete', risk: 'high', sensitive: false, note: `destructive click "${name.slice(0, 40)}"` }
-  if (RE.payAction.test(name)) return { contractAction: 'payment', risk: 'high', sensitive: false, note: `payment click "${name.slice(0, 40)}"` }
-  if (RE.sendAction.test(name)) return { contractAction: 'send', risk: 'high', sensitive: false, note: `send/share click "${name.slice(0, 40)}"` }
-  if (RE.authAction.test(name)) return { contractAction: 'login', risk: 'high', sensitive: false, note: `auth click "${name.slice(0, 40)}"` }
+  if (RE.destructive.test(name))
+    return {
+      contractAction: 'delete',
+      risk: 'high',
+      sensitive: false,
+      note: `destructive click "${name.slice(0, 40)}"`
+    }
+  if (RE.payAction.test(name))
+    return {
+      contractAction: 'payment',
+      risk: 'high',
+      sensitive: false,
+      note: `payment click "${name.slice(0, 40)}"`
+    }
+  if (RE.sendAction.test(name))
+    return {
+      contractAction: 'send',
+      risk: 'high',
+      sensitive: false,
+      note: `send/share click "${name.slice(0, 40)}"`
+    }
+  if (RE.authAction.test(name))
+    return {
+      contractAction: 'login',
+      risk: 'high',
+      sensitive: false,
+      note: `auth click "${name.slice(0, 40)}"`
+    }
 
   if (RE.submitAction.test(name) || el?.role === 'submit' || el?.type === 'submit') {
-    return { contractAction: contextAction(ctx), risk: 'high', sensitive: false, note: ctx.sensitive ? `submit/confirm in ${ctx.kinds.join('/')} context` : 'submit/confirm click' }
+    return {
+      contractAction: contextAction(ctx),
+      risk: 'high',
+      sensitive: false,
+      note: ctx.sensitive ? `submit/confirm in ${ctx.kinds.join('/')} context` : 'submit/confirm click'
+    }
   }
 
   // Vague labels ("Continue", "Next", "Agree") are high-risk in a sensitive
   // context (they advance a payment/login/account flow) and medium otherwise.
   if (RE.vagueAction.test(name)) {
-    if (ctx.sensitive) return { contractAction: contextAction(ctx), risk: 'high', sensitive: false, note: `vague action "${name.slice(0, 24)}" in ${ctx.kinds.join('/')} context` }
-    return { contractAction: 'submit', risk: 'medium', sensitive: false, note: `vague action "${name.slice(0, 24)}"` }
+    if (ctx.sensitive)
+      return {
+        contractAction: contextAction(ctx),
+        risk: 'high',
+        sensitive: false,
+        note: `vague action "${name.slice(0, 24)}" in ${ctx.kinds.join('/')} context`
+      }
+    return {
+      contractAction: 'submit',
+      risk: 'medium',
+      sensitive: false,
+      note: `vague action "${name.slice(0, 24)}"`
+    }
   }
 
   // On a sensitive page (payment/login/account), escalate clicks on ACTION-style
@@ -127,16 +169,32 @@ function classifyClick(el: AgentElement | undefined, ctx: PageContext): Classifi
   // so general browsing of a site that merely has a "Sign in" header still works.
   const isNavLink = (el?.tag === 'a' || el?.role === 'link') && !!el?.href && /^https?:/i.test(el.href)
   if (ctx.sensitive && !isNavLink) {
-    return { contractAction: 'submit', risk: 'high', sensitive: false, note: `action in ${ctx.kinds.join('/')} context — confirm` }
+    return {
+      contractAction: 'submit',
+      risk: 'high',
+      sensitive: false,
+      note: `action in ${ctx.kinds.join('/')} context — confirm`
+    }
+  }
+
+  // A navigation link that leaves the current site is medium-risk: it's still
+  // just navigation (re-evaluated on the destination), but crossing to an
+  // unknown domain is worth a heads-up — Safe mode asks, Assisted/Auto allow.
+  if (isNavLink) {
+    const dest = domainOf(el!.href!)
+    if (dest && ctx.domain && dest !== ctx.domain) {
+      return {
+        contractAction: 'open',
+        risk: 'medium',
+        sensitive: false,
+        note: `navigate to external domain ${dest}`
+      }
+    }
+    return { contractAction: 'click', risk: 'low', sensitive: false, note: 'navigation link' }
   }
 
   const isButton = el?.role === 'button' || el?.tag === 'button'
-  return {
-    contractAction: 'click',
-    risk: 'low',
-    sensitive: false,
-    note: isButton ? 'button click' : isNavLink ? 'navigation link' : 'click'
-  }
+  return { contractAction: 'click', risk: 'low', sensitive: false, note: isButton ? 'button click' : 'click' }
 }
 
 /** Map a proposed action to a contract action name + a base risk level. */
@@ -157,9 +215,16 @@ export function classify(proposal: ActionProposal, view: AgentView | null): Clas
       return classifyClick(findElement(view, proposal.ref), ctx)
     case 'typeRef': {
       const el = findElement(view, proposal.ref)
-      if (el?.sensitive) return { contractAction: 'login', risk: 'high', sensitive: true, note: 'type into sensitive field' }
+      if (el?.sensitive)
+        return { contractAction: 'login', risk: 'high', sensitive: true, note: 'type into sensitive field' }
       // Typing on a payment page may be an unlabeled card/secret field — confirm.
-      if (ctx.kinds.includes('payment')) return { contractAction: 'type', risk: 'high', sensitive: true, note: 'typing in a payment context (possible card/secret field)' }
+      if (ctx.kinds.includes('payment'))
+        return {
+          contractAction: 'type',
+          risk: 'high',
+          sensitive: true,
+          note: 'typing in a payment context (possible card/secret field)'
+        }
       return { contractAction: 'type', risk: 'medium', sensitive: false, note: 'type' }
     }
   }
@@ -196,7 +261,10 @@ export function evaluate(input: GateInput): GateResult {
   // Ref-based actions require a fresh Agent View. If the ref is not present
   // (view failed to capture, or the ref is stale/hallucinated), don't silently
   // treat it as a low-risk click/type — ask and force a refresh.
-  if ((proposal.kind === 'clickRef' || proposal.kind === 'typeRef') && !findElement(agentView, proposal.ref)) {
+  if (
+    (proposal.kind === 'clickRef' || proposal.kind === 'typeRef') &&
+    !findElement(agentView, proposal.ref)
+  ) {
     return ask('high', 'target @ref is not in the current Agent View — refresh and retry')
   }
 
@@ -222,12 +290,18 @@ export function evaluate(input: GateInput): GateResult {
   // Mode + risk policy for contract-permitted actions.
   switch (mode) {
     case 'safe':
-      return risk === 'low' ? allow(risk, 'safe: low-risk allowed') : ask(risk, `safe: confirm ${risk}-risk ${contractAction} — ${note}`)
+      return risk === 'low'
+        ? allow(risk, 'safe: low-risk allowed')
+        : ask(risk, `safe: confirm ${risk}-risk ${contractAction} — ${note}`)
     case 'assisted':
-      return risk === 'high' ? ask(risk, `assisted: confirm high-risk ${contractAction} — ${note}`) : allow(risk, 'assisted: low/medium allowed')
+      return risk === 'high'
+        ? ask(risk, `assisted: confirm high-risk ${contractAction} — ${note}`)
+        : allow(risk, 'assisted: low/medium allowed')
     case 'auto':
       // TODO(phase-later): per-action "auto-approve high-risk" config toggle.
-      return risk === 'high' ? ask(risk, `auto: confirm high-risk ${contractAction} — ${note}`) : allow(risk, 'auto: acting inside contract')
+      return risk === 'high'
+        ? ask(risk, `auto: confirm high-risk ${contractAction} — ${note}`)
+        : allow(risk, 'auto: acting inside contract')
     default:
       return ask(risk, 'unknown mode — confirming to be safe')
   }

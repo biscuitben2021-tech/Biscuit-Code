@@ -40,7 +40,6 @@ export function buildExtractScript(opts: ExtractOptions): string {
 // ever serialized via .toString() and run in the page world; type annotations
 // are stripped at compile time.
 export function extractorSource(generation: number, maxElements: number, maxTextChars: number): unknown {
-  /* eslint-disable */
   const topDoc = document
   const topWin = window
   topDoc.documentElement.setAttribute('data-biscuit-gen', String(generation))
@@ -160,7 +159,13 @@ export function extractorSource(generation: number, maxElements: number, maxText
   function isSensitive(el) {
     const t = (el.type || '').toLowerCase()
     if (t === 'password') return true
-    const hay = ((el.name || '') + ' ' + (el.id || '') + ' ' + (el.getAttribute('autocomplete') || '')).toLowerCase()
+    const hay = (
+      (el.name || '') +
+      ' ' +
+      (el.id || '') +
+      ' ' +
+      (el.getAttribute('autocomplete') || '')
+    ).toLowerCase()
     return /pass|card|cc-|cvv|cvc|ssn|secret|otp|securitycode|account-?number|routing/.test(hay)
   }
 
@@ -170,6 +175,21 @@ export function extractorSource(generation: number, maxElements: number, maxText
       if (el.getAttribute && el.getAttribute('aria-disabled') === 'true') return true
     } catch (e) {}
     if (style && style.pointerEvents === 'none') return true
+    return false
+  }
+
+  // Containment across shadow boundaries — Node.contains() does not pierce
+  // host->shadow, so a same-widget hit would otherwise read as "covered".
+  function composedContains(a, b) {
+    let n = b
+    while (n) {
+      if (n === a) return true
+      if (n.nodeType === 11 && n.host) {
+        n = n.host
+        continue
+      }
+      n = n.parentNode
+    }
     return false
   }
 
@@ -185,7 +205,7 @@ export function extractorSource(generation: number, maxElements: number, maxText
     }
     if (!top || top === el) return false
     try {
-      if (el.contains(top) || top.contains(el)) return false
+      if (composedContains(el, top) || composedContains(top, el)) return false
     } catch (e) {}
     return true
   }
@@ -290,7 +310,11 @@ export function extractorSource(generation: number, maxElements: number, maxText
           if (label && label.length <= 60) {
             let skip = false
             try {
-              skip = !!(el.closest(SELECTOR) || el.querySelector(SELECTOR) || el.closest('[data-biscuit-ref]'))
+              skip = !!(
+                el.closest(SELECTOR) ||
+                el.querySelector(SELECTOR) ||
+                el.closest('[data-biscuit-ref]')
+              )
             } catch (e) {
               skip = false
             }
@@ -354,7 +378,10 @@ export function extractorSource(generation: number, maxElements: number, maxText
     if (text) headings.push({ level: parseInt(h.tagName.substring(1), 10), text: text.slice(0, 200) })
   }
 
-  let text = ((topDoc.body && topDoc.body.innerText) || '').replace(/[\t\r]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim()
+  let text = ((topDoc.body && topDoc.body.innerText) || '')
+    .replace(/[\t\r]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
   if (text.length > maxTextChars) {
     text = text.slice(0, maxTextChars)
     truncated = true
@@ -362,9 +389,13 @@ export function extractorSource(generation: number, maxElements: number, maxText
 
   const notes = []
   if (frames.crossOrigin > 0)
-    notes.push(frames.crossOrigin + ' cross-origin frame(s) could not be inspected (the agent is blind to these)')
+    notes.push(
+      frames.crossOrigin + ' cross-origin frame(s) could not be inspected (the agent is blind to these)'
+    )
   if (depthCapped > 0)
-    notes.push(depthCapped + ' frame(s) beyond max nesting depth were not inspected (depth limit, not cross-origin)')
+    notes.push(
+      depthCapped + ' frame(s) beyond max nesting depth were not inspected (depth limit, not cross-origin)'
+    )
   if (shadowRoots > 0) notes.push(shadowRoots + ' open shadow root(s) traversed')
   if (truncated) notes.push('snapshot truncated (element/node cap reached)')
 
@@ -377,5 +408,4 @@ export function extractorSource(generation: number, maxElements: number, maxText
     truncated: truncated,
     context: { frames: frames, shadowRoots: shadowRoots, notes: notes }
   }
-  /* eslint-enable */
 }

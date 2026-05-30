@@ -19,6 +19,21 @@ Gate**. You stay in control: approve, deny, or hit Stop.
 > See [Limitations](#limitations-read-this) for what it does *not* do yet — we'd
 > rather under-promise.
 
+## Demo
+
+![Biscuit Browser demo](docs/demo.gif)
+
+> The demo GIF and screenshots are captured from the running app — see
+> [`docs/`](docs/README.md) for exactly what to record and where it goes. No API
+> key? Launch and use the built-in **Demo mode** (no model required) to see the
+> Agent View, a Task Contract, and the Action Gate in action first.
+
+### Screenshots
+
+Pending capture (see [`docs/README.md`](docs/README.md)): the normal browser +
+side panel, the Agent View (`@e` refs + coverage notes), the Task Contract, an
+approval prompt, the Bypass (Danger) banner, and the Action Log.
+
 ---
 
 ## Why you might care
@@ -84,26 +99,29 @@ The window is a normal browser on the left and an AI panel on the right:
 - **Approvals** — pending actions the gate flagged. Approve / Deny.
 - **Settings** — provider, model, base URL, API key, default mode, expert mode.
 
-> 📸 A screenshot/GIF walkthrough is welcome — drop one in `docs/` and link it
-> here (see [Contributing](./CONTRIBUTING.md)).
-
 ## Permission modes
 
-| Mode         | Behavior                                                              |
-| ------------ | --------------------------------------------------------------------- |
-| **Safe**     | You review & lock the contract; the gate asks before most actions.    |
-| **Assisted** | *(default)* Low/medium-risk actions run; high-risk ones ask first.    |
-| **Auto**     | Acts inside the contract; only high-risk actions ask.                 |
-| **Bypass**   | Expert-only. No prompts, no contract — but Stop + logging stay on.    |
+| Mode               | Behavior                                                              |
+| ------------------ | --------------------------------------------------------------------- |
+| **Safe**           | You review & lock the contract; the gate asks before most actions.    |
+| **Assisted**       | *(default)* Low/medium-risk actions run; high-risk ones ask first.    |
+| **Auto**           | Acts inside the contract; only high-risk actions ask.                 |
+| **Bypass (Danger)** | Expert-only. No prompts, no contract — but Stop + logging stay on.   |
 
-**Bypass is deliberately hard to enable.** It is hidden unless you turn on
-*Expert mode* in Settings, requires typing `ENABLE BYPASS` to arm, shows a
-persistent red banner while active, cannot be saved as a default, and is
-automatically dropped back to Assisted when you press Stop.
+**Bypass is deliberately hard to enable.** It is labeled **Bypass (Danger)**,
+hidden unless you turn on *Expert mode* in Settings, requires typing
+`ENABLE BYPASS` to arm, shows a persistent red banner while active, cannot be
+saved as a default, and is automatically dropped back to Assisted when you press
+Stop or disable expert mode.
 
 ## Is it safe?
 
-Security is the point, so the model is explicit:
+**Honest framing first:** Biscuit *reduces* prompt-injection risk — it does
+**not** "prevent" it, and no agent browser can today. It makes the agent's
+intent explicit (the locked Task Contract), its view of the page inspectable
+(the Agent View), and every action revocable (the Action Gate + Stop). Read the
+full [**Threat Model**](docs/THREAT_MODEL.md) for trust boundaries and known
+gaps. With that framing, the concrete mechanisms:
 
 - **Locked-down processes.** `contextIsolation`, `sandbox`, and
   `nodeIntegration: false` for both the app UI and every browsed page. Browsed
@@ -199,8 +217,10 @@ wired up in V1.
 
 ## Roadmap
 
-- [ ] CDP/Playwright controller for cross-origin frames + robust control where
-      `executeJavaScript` is insufficient.
+Full roadmap (V1 / V2 / later): [**docs/ROADMAP.md**](docs/ROADMAP.md). Highlights:
+
+- [ ] CDP/Playwright controller for cross-origin frames + robust control (and
+      real pointer/keyboard input events) where `executeJavaScript` is insufficient.
 - [ ] MutationObserver-based ref invalidation for same-document DOM changes.
 - [ ] Streaming model responses into Chat.
 - [ ] Persist + export action logs and contracts.
@@ -208,10 +228,13 @@ wired up in V1.
 - [ ] Code signing / notarization for packaged macOS & Windows builds.
 - [ ] Connect the Rust `biscuits` CLI as a model/agent backend.
 
-**Out of scope for V1** (per spec): Chrome extensions, cloud browser hosting, a
-plugin marketplace, payments, account sync.
+**Out of scope for V1**: Chrome extensions, cloud browser hosting, a plugin
+marketplace, payments, account sync, CAPTCHAs, banking sites.
 
 ## Contributing & License
 
-Contributions welcome — see [CONTRIBUTING.md](./CONTRIBUTING.md). Licensed under
+Contributions welcome — see [CONTRIBUTING.md](./CONTRIBUTING.md),
+[good first issues](docs/GOOD_FIRST_ISSUES.md), the
+[Threat Model](docs/THREAT_MODEL.md), and the [Roadmap](docs/ROADMAP.md).
+Community standards: [CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md). Licensed under
 the [MIT License](./LICENSE).

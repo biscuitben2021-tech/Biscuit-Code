@@ -39,9 +39,15 @@ export function BypassConfirmModal({ open, onCancel, onConfirm }: Props): JSX.El
           including high-risk actions like logins, payments, sending messages, and deletions.
         </p>
         <ul className="modal-list">
-          <li>The emergency <b>Stop</b> button stays active.</li>
-          <li>Every action is still written to the <b>Action Log</b>.</li>
-          <li>Pressing <b>Stop</b> automatically drops back to Assisted.</li>
+          <li>
+            The emergency <b>Stop</b> button stays active.
+          </li>
+          <li>
+            Every action is still written to the <b>Action Log</b>.
+          </li>
+          <li>
+            Pressing <b>Stop</b> automatically drops back to Assisted.
+          </li>
         </ul>
         <p className="muted">
           Type <code>{PHRASE}</code> to confirm you understand the risk.

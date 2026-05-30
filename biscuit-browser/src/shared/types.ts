@@ -40,15 +40,7 @@ export interface ElementState {
 /** Where in the page tree an element was found (transparency for the agent). */
 export type ElementSource = 'dom' | 'shadow' | 'iframe'
 
-export type ElementRole =
-  | 'link'
-  | 'button'
-  | 'textbox'
-  | 'checkbox'
-  | 'radio'
-  | 'select'
-  | 'submit'
-  | 'other'
+export type ElementRole = 'link' | 'button' | 'textbox' | 'checkbox' | 'radio' | 'select' | 'submit' | 'other'
 
 export interface AgentElement {
   ref: string // stable short ref e.g. "@e1"
@@ -250,6 +242,14 @@ export interface Settings {
   expertMode: boolean
   /** Never contains the raw key — only whether one is stored. */
   hasApiKey: boolean
+  /**
+   * How the key is held: `encrypted` (OS keychain, persisted), `session`
+   * (in memory only — not written to disk because the keychain is unavailable),
+   * or `none`.
+   */
+  keyStorage: 'encrypted' | 'session' | 'none'
+  /** Whether the OS keychain (safeStorage) can encrypt a key at rest. */
+  secureStorageAvailable: boolean
 }
 
 /** Payload used when the renderer saves settings (may include a new key). */

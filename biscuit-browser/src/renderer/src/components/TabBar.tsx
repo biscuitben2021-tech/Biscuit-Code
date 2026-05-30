@@ -10,7 +10,10 @@ export function TabBar({ tabs }: { tabs: TabState[] }): JSX.Element {
           onClick={() => void window.biscuit.tabs.activate(tab.id)}
           title={tab.url}
         >
-          <span className="title">{tab.isLoading ? '… ' : ''}{tab.title || 'New Tab'}</span>
+          <span className="title">
+            {tab.isLoading ? '… ' : ''}
+            {tab.title || 'New Tab'}
+          </span>
           <button
             className="close"
             title="Close tab"

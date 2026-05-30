@@ -64,6 +64,47 @@ export async function clickRef(wc: WebContents, ref: string, generation: number)
     var od = el.ownerDocument;
     if (!od || !od.documentElement || od.documentElement.getAttribute('data-biscuit-gen') !== gen) return {ok:false, detail:'refs expired (page changed) — call refreshAgentView'};
     try { el.scrollIntoView({block:'center', inline:'center'}); } catch(e){}
+    // Covered-element check: if something else (a modal/cookie wall/overlay)
+    // sits over the target's center, clicking would hit the overlay instead.
+    // ownerDocument === document is true for top-document light DOM AND shadow
+    // elements (shadow doesn't change ownerDocument) but false for iframe
+    // elements, whose coordinates would be frame-relative — so skip those.
+    if (el.ownerDocument === document) {
+      // Containment across shadow boundaries: Node.contains() does NOT pierce
+      // host->shadow, so a same-widget hit would otherwise read as "covered".
+      var composedContains = function(a, b){
+        var n = b;
+        while (n){
+          if (n === a) return true;
+          if (n.nodeType === 11 && n.host) { n = n.host; continue; } // shadow root -> host
+          n = n.parentNode;
+        }
+        return false;
+      };
+      try {
+        var rect = el.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          var cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
+          if (cx >= 0 && cy >= 0 && cx <= (window.innerWidth||0) && cy <= (window.innerHeight||0)) {
+            // Descend through open shadow roots to the deepest element at the point.
+            var top = document.elementFromPoint(cx, cy);
+            while (top && top.shadowRoot) {
+              var inner = top.shadowRoot.elementFromPoint(cx, cy);
+              if (!inner || inner === top) break;
+              top = inner;
+            }
+            if (top && top !== el && !composedContains(el, top) && !composedContains(top, el)) {
+              var d = top.tagName ? top.tagName.toLowerCase() : 'element';
+              if (top.className && typeof top.className === 'string') {
+                var cls = top.className.trim().split(/\\s+/).slice(0,2).join('.');
+                if (cls) d += '.' + cls;
+              }
+              return {ok:false, detail:'@'+ref+' is covered by <'+d+'> — dismiss the overlay/cookie wall, then refreshAgentView'};
+            }
+          }
+        }
+      } catch(e){ /* best-effort; fall through to click */ }
+    }
     // Build a human label from the element text/labels only — never the field
     // contents, which could leak a password / card number into the log, the UI,
     // and the model's recent-actions buffer.

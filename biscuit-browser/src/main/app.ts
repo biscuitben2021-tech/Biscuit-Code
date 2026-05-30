@@ -1,6 +1,7 @@
 import { BrowserWindow, ipcMain } from 'electron'
 import type {
   ActionProposal,
+  AgentView,
   ApprovalRequest,
   ChatMessage,
   ContractState,
@@ -16,6 +17,7 @@ import { SettingsStore } from './settings/store'
 import { TabManager } from './tabs'
 import { AgentRuntime } from './agent/runtime'
 import { generateContract } from './agent/taskContract'
+import { evaluate } from './agent/actionGate'
 import { executeProposal } from './actions/execute'
 import type { LlmConfig } from './agent/llm'
 
@@ -98,7 +100,10 @@ export class App {
 
   private setContract(next: ContractState): void {
     this.contract = next
-    this.log.add({ type: 'contract', message: `contract ${next.status}: ${next.contract?.goal ?? '(cleared)'}` })
+    this.log.add({
+      type: 'contract',
+      message: `contract ${next.status}: ${next.contract?.goal ?? '(cleared)'}`
+    })
     this.send(IPC.EVT_CONTRACT_CHANGED, next)
   }
 
@@ -110,7 +115,10 @@ export class App {
 
     // A new prompt must never replace the locked contract of a running task.
     if (this.runtime.isRunning()) {
-      this.send(IPC.EVT_CHAT_MESSAGE, chatMessage('system', 'A task is already running. Press Stop before starting a new one.'))
+      this.send(
+        IPC.EVT_CHAT_MESSAGE,
+        chatMessage('system', 'A task is already running. Press Stop before starting a new one.')
+      )
       return
     }
 
@@ -131,12 +139,21 @@ export class App {
         status: 'awaiting-approval',
         message: 'Review and lock the Task Contract (Contract tab) to begin.'
       })
-      this.send(IPC.EVT_CHAT_MESSAGE, chatMessage('system', 'Safe mode: review and lock the Task Contract to start.'))
+      this.send(
+        IPC.EVT_CHAT_MESSAGE,
+        chatMessage('system', 'Safe mode: review and lock the Task Contract to start.')
+      )
       return
     }
 
     // Assisted / Auto: auto-lock the contract, then run.
-    this.setContract({ status: 'locked', contract, prompt: clean, createdAt: Date.now(), lockedAt: Date.now() })
+    this.setContract({
+      status: 'locked',
+      contract,
+      prompt: clean,
+      createdAt: Date.now(),
+      lockedAt: Date.now()
+    })
     void this.runtime.start(clean)
   }
 
@@ -207,7 +224,10 @@ export class App {
       // Inspection only. Page-mutating actions must go through the gated agent
       // runtime — they are never runnable directly from the renderer.
       if (proposal.kind !== 'screenshot' && proposal.kind !== 'refreshAgentView') {
-        return { ok: false, detail: `'${proposal.kind}' is not allowed here; use the agent (gated) for actions` }
+        return {
+          ok: false,
+          detail: `'${proposal.kind}' is not allowed here; use the agent (gated) for actions`
+        }
       }
       const result = await executeProposal(this.tabs, proposal)
       this.log.add({ type: 'action', action: proposal.kind, message: `manual: ${result.detail}` })
@@ -265,6 +285,7 @@ export class App {
 
     // Chat starts/continues a task. (RUNTIME_STOP is the emergency stop.)
     h(IPC.CHAT_SEND, (_e, message: string) => this.startTask(message))
+    h(IPC.DEMO_RUN, () => this.runDemo())
     h(IPC.RUNTIME_STOP, () => {
       this.runtime.stop()
       this.cancelApprovals()
@@ -273,6 +294,133 @@ export class App {
       if (this.mode === 'bypass') this.setMode('assisted')
       return true
     })
+  }
+
+  // ── Demo mode (no API key) ──────────────────────────────────────────────
+  /**
+   * A scripted, model-free walkthrough so a first-time user can see the product
+   * before configuring a provider. It locks a canned Task Contract and runs a
+   * few synthetic actions through the REAL Action Gate (no model call, no
+   * network, no real browser action) — showing allow / ask / block decisions in
+   * the Action Log and Chat, plus the contract in the Contract tab.
+   */
+  private runDemo(): void {
+    if (this.runtime.isRunning()) {
+      this.send(
+        IPC.EVT_CHAT_MESSAGE,
+        chatMessage('system', 'Stop the running task before starting the demo.')
+      )
+      return
+    }
+    const say = (role: ChatMessage['role'], text: string): void =>
+      this.send(IPC.EVT_CHAT_MESSAGE, chatMessage(role, text))
+
+    say('user', '▶ Run the keyless demo')
+    say(
+      'system',
+      'Demo mode — no model is called and no real browser action runs. This just shows the Task Contract and how the Action Gate classifies actions on a (fake) checkout page.'
+    )
+
+    const contract: TaskContract = {
+      goal: 'Find a blue widget and read its price (demo)',
+      allowed_actions: ['open', 'read', 'search', 'scroll', 'click'],
+      requires_user_confirmation: ['type', 'submit'],
+      blocked_without_user_override: ['login', 'payment', 'send', 'delete', 'settings']
+    }
+    this.setContract({
+      status: 'locked',
+      contract,
+      prompt: '(demo) find a blue widget and read its price',
+      createdAt: Date.now(),
+      lockedAt: Date.now()
+    })
+
+    const demoView: AgentView = {
+      tabId: 'demo',
+      url: 'https://shop.example/checkout',
+      title: 'Checkout — shop.example',
+      generation: 1,
+      capturedAt: Date.now(),
+      headings: [{ level: 1, text: 'Checkout' }],
+      elements: [
+        {
+          ref: '@e1',
+          role: 'link',
+          tag: 'a',
+          name: 'Product details',
+          href: 'https://shop.example/widget',
+          state: { visible: true, enabled: true, inViewport: true },
+          box: { x: 0, y: 0, width: 120, height: 20 }
+        },
+        {
+          ref: '@e2',
+          role: 'textbox',
+          tag: 'input',
+          name: 'Search products',
+          state: { visible: true, enabled: true, inViewport: true },
+          box: { x: 0, y: 0, width: 160, height: 24 }
+        },
+        {
+          ref: '@e3',
+          role: 'textbox',
+          tag: 'input',
+          name: 'Card number',
+          sensitive: true,
+          state: { visible: true, enabled: true, inViewport: true },
+          box: { x: 0, y: 0, width: 200, height: 24 }
+        },
+        {
+          ref: '@e4',
+          role: 'button',
+          tag: 'button',
+          name: 'Continue',
+          state: { visible: true, enabled: true, inViewport: true },
+          box: { x: 0, y: 0, width: 90, height: 30 }
+        },
+        {
+          ref: '@e5',
+          role: 'button',
+          tag: 'button',
+          name: 'Pay now',
+          state: { visible: true, enabled: true, inViewport: true },
+          box: { x: 0, y: 0, width: 90, height: 30 }
+        }
+      ],
+      text: 'Checkout. Order summary. Place order. Billing. Card number. Pay now.',
+      truncated: false
+    }
+
+    say(
+      'assistant',
+      'Synthetic Agent View:\n  @e1 link "Product details"\n  @e2 textbox "Search products"\n  @e3 textbox "Card number" (SENSITIVE)\n  @e4 button "Continue"\n  @e5 button "Pay now"'
+    )
+
+    const steps: { p: ActionProposal; why: string }[] = [
+      { p: { kind: 'scroll', direction: 'down' }, why: 'scroll the page' },
+      { p: { kind: 'clickRef', ref: '@e1' }, why: 'click the "Product details" link' },
+      { p: { kind: 'typeRef', ref: '@e2', text: 'blue widget' }, why: 'type "blue widget" into search' },
+      { p: { kind: 'clickRef', ref: '@e4' }, why: 'click "Continue" (vague, on a checkout page)' },
+      { p: { kind: 'clickRef', ref: '@e5' }, why: 'click "Pay now"' }
+    ]
+    for (const s of steps) {
+      const gate = evaluate({ proposal: s.p, mode: 'assisted', contract, agentView: demoView })
+      this.log.add({
+        type: 'gate',
+        message: `(demo) ${gate.reason}`,
+        action: s.p.kind,
+        decision: gate.decision,
+        risk: gate.risk,
+        mode: 'assisted'
+      })
+      const icon = gate.decision === 'allow' ? '✅ allow' : gate.decision === 'ask' ? '🔶 ask' : '🛑 block'
+      say('assistant', `${icon} — ${s.why}\n   gate: ${gate.decision}/${gate.risk} — ${gate.reason}`)
+    }
+
+    say(
+      'system',
+      'End of demo. The contract is in the Contract tab and every decision is in the Action Log. Add a provider in Settings (or LM Studio, no key) to run the real agent.'
+    )
+    this.send(IPC.EVT_RUNTIME_UPDATE, { status: 'done', message: 'Demo complete.' })
   }
 
   destroy(): void {

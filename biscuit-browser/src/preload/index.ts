@@ -1,12 +1,7 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import { IPC, type ViewBounds } from '@shared/ipc'
 import type { BiscuitApi } from '@shared/api'
-import type {
-  ActionProposal,
-  PermissionMode,
-  SettingsUpdate,
-  TaskContract
-} from '@shared/types'
+import type { ActionProposal, PermissionMode, SettingsUpdate, TaskContract } from '@shared/types'
 
 // Subscribe to a main->renderer event; returns an unsubscribe fn. The handler
 // is wrapped so the renderer never receives the raw IpcRendererEvent.
@@ -62,6 +57,9 @@ const api: BiscuitApi = {
   },
   chat: {
     send: (message) => ipcRenderer.invoke(IPC.CHAT_SEND, message)
+  },
+  demo: {
+    run: () => ipcRenderer.invoke(IPC.DEMO_RUN)
   },
 
   onTabsChanged: (cb) => on(IPC.EVT_TABS_CHANGED, cb),

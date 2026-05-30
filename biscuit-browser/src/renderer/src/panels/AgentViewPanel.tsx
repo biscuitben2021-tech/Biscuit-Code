@@ -63,8 +63,8 @@ export function AgentViewPanel(): JSX.Element {
               <>
                 <span className="k">Coverage</span>
                 <span>
-                  {view.context.frames.sameOrigin} same-origin / {view.context.frames.crossOrigin} cross-origin
-                  frame(s) · {view.context.shadowRoots} shadow root(s)
+                  {view.context.frames.sameOrigin} same-origin / {view.context.frames.crossOrigin}{' '}
+                  cross-origin frame(s) · {view.context.shadowRoots} shadow root(s)
                 </span>
               </>
             )}
@@ -118,7 +118,9 @@ export function AgentViewPanel(): JSX.Element {
       )}
 
       {!view && !shot && !error && (
-        <p className="muted">Capture the Agent View to see the page as the agent sees it — text and @e refs, no raw HTML.</p>
+        <p className="muted">
+          Capture the Agent View to see the page as the agent sees it — text and @e refs, no raw HTML.
+        </p>
       )}
     </div>
   )

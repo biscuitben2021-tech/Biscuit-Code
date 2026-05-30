@@ -11,7 +11,11 @@ interface RawView {
   elements: any[]
   text: string
   truncated: boolean
-  context: { frames: { total: number; sameOrigin: number; crossOrigin: number }; shadowRoots: number; notes: string[] }
+  context: {
+    frames: { total: number; sameOrigin: number; crossOrigin: number }
+    shadowRoots: number
+    notes: string[]
+  }
 }
 
 // jsdom does no layout, so getBoundingClientRect returns zeros and every element
@@ -20,7 +24,17 @@ interface RawView {
 const origRect = Element.prototype.getBoundingClientRect
 beforeAll(() => {
   Element.prototype.getBoundingClientRect = function (): DOMRect {
-    return { x: 10, y: 10, left: 10, top: 10, right: 110, bottom: 30, width: 100, height: 20, toJSON: () => ({}) } as DOMRect
+    return {
+      x: 10,
+      y: 10,
+      left: 10,
+      top: 10,
+      right: 110,
+      bottom: 30,
+      width: 100,
+      height: 20,
+      toJSON: () => ({})
+    } as DOMRect
   }
 })
 afterAll(() => {

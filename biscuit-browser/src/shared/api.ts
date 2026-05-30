@@ -67,6 +67,10 @@ export interface BiscuitApi {
   chat: {
     send(message: string): Promise<void>
   }
+  demo: {
+    /** Run a scripted, model-free demo (contract + Action Gate decisions). */
+    run(): Promise<void>
+  }
 
   // Event subscriptions (each returns an unsubscribe function).
   onTabsChanged(cb: (tabs: TabState[]) => void): () => void

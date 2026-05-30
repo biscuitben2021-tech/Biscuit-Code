@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { useBiscuit } from '../state/store'
 
+const EXAMPLES = [
+  'Summarize this page.',
+  'Find the pricing page and compare the plans.',
+  'Open the docs and find the install command.',
+  'List every clickable action on this page.'
+]
+
 export function ChatPanel(): JSX.Element {
   const { chat, runtime } = useBiscuit()
   const [text, setText] = useState('')
@@ -23,8 +30,22 @@ export function ChatPanel(): JSX.Element {
       <div className="chat-log" ref={logRef}>
         {chat.length === 0 && (
           <div className="msg system">
-            Ask Biscuit to research or do something on the web. A Task Contract is generated from your
-            request before any action runs.
+            Ask Biscuit to research or do something on the web. A Task Contract is generated from your request
+            before any action runs.
+            <div className="examples">
+              <span className="muted">Try:</span>
+              {EXAMPLES.map((ex) => (
+                <button key={ex} className="example-chip" onClick={() => setText(ex)}>
+                  {ex}
+                </button>
+              ))}
+            </div>
+            <div className="examples">
+              <span className="muted">No API key?</span>
+              <button className="example-chip" onClick={() => void window.biscuit.demo.run()}>
+                ▶ Run keyless demo
+              </button>
+            </div>
           </div>
         )}
         {chat.map((m) => (
@@ -33,7 +54,11 @@ export function ChatPanel(): JSX.Element {
           </div>
         ))}
       </div>
-      {runtime && <div className="muted" style={{ padding: '0 10px 6px' }}>status: {runtime.status}</div>}
+      {runtime && (
+        <div className="muted" style={{ padding: '0 10px 6px' }}>
+          status: {runtime.status}
+        </div>
+      )}
       <div className="composer">
         <textarea
           value={text}

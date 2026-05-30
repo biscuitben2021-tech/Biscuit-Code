@@ -1,5 +1,11 @@
 import { useEffect, useState } from 'react'
-import { PERMISSION_MODES, describeMode, type PermissionMode, type RuntimeUpdate, type TabState } from '@shared/types'
+import {
+  PERMISSION_MODES,
+  describeMode,
+  type PermissionMode,
+  type RuntimeUpdate,
+  type TabState
+} from '@shared/types'
 
 interface Props {
   activeTab: TabState | null
@@ -88,7 +94,7 @@ export function Toolbar({ activeTab, mode, runtime, expertMode, onArmBypass }: P
       >
         {PERMISSION_MODES.filter((m) => m !== 'bypass' || expertMode || mode === 'bypass').map((m) => (
           <option key={m} value={m}>
-            {m}
+            {m === 'bypass' ? 'bypass (danger)' : m}
           </option>
         ))}
       </select>

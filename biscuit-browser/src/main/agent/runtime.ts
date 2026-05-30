@@ -17,7 +17,20 @@ import { shouldVerify, verifyAction } from './verify'
 import { EXECUTOR_SYSTEM } from './prompts'
 
 const MAX_STEPS = 16
-const ACTION_KINDS = ['openUrl', 'clickRef', 'typeRef', 'scroll', 'refreshAgentView', 'screenshot', 'done', 'ask']
+// Loop safety: stop if too many actions fail in a row, or if the model keeps
+// proposing the exact same action with no progress (a stuck loop).
+const MAX_CONSECUTIVE_FAILURES = 4
+const MAX_REPEATS = 3
+const ACTION_KINDS = [
+  'openUrl',
+  'clickRef',
+  'typeRef',
+  'scroll',
+  'refreshAgentView',
+  'screenshot',
+  'done',
+  'ask'
+]
 
 export interface RuntimeDeps {
   tabs: TabManager
@@ -62,6 +75,12 @@ export class AgentRuntime {
     this.running = true
     this.stopped = false
     const recent: string[] = []
+    let consecutiveFailures = 0
+    let lastSig = ''
+    let repeatCount = 0
+    // A caution about the previous action (failed / unverified) carried into a
+    // subsequent 'done' so the agent can't silently declare success on a no-op.
+    let lastConcern = ''
     this.deps.emit({ status: 'running', message: 'Starting task…' })
 
     try {
@@ -80,7 +99,9 @@ export class AgentRuntime {
         const stateText = this.buildState(prompt, view, recent, step)
         let proposal: ActionProposal
         try {
-          proposal = normalizeProposal(await llmJson<ActionProposal>(this.deps.getLlmConfig(), EXECUTOR_SYSTEM, stateText))
+          proposal = normalizeProposal(
+            await llmJson<ActionProposal>(this.deps.getLlmConfig(), EXECUTOR_SYSTEM, stateText)
+          )
         } catch (err) {
           this.deps.emit({ status: 'error', message: `Model error: ${(err as Error).message}` })
           this.deps.log({ type: 'runtime', message: `model error: ${(err as Error).message}` })
@@ -90,13 +111,34 @@ export class AgentRuntime {
         if (this.stopped) break
 
         if (proposal.kind === 'done') {
-          this.deps.emit({ status: 'done', message: proposal.message ?? 'Task complete.' })
-          this.deps.log({ type: 'runtime', message: `done: ${proposal.message ?? ''}` })
+          // Verify-before-done: if the immediately-preceding action failed or
+          // could not be confirmed, surface that rather than reporting success.
+          const caution = lastConcern ? ` (caution: ${lastConcern})` : ''
+          this.deps.emit({ status: 'done', message: (proposal.message ?? 'Task complete.') + caution })
+          this.deps.log({ type: 'runtime', message: `done: ${proposal.message ?? ''}${caution}` })
           break
         }
         if (proposal.kind === 'ask') {
-          this.deps.emit({ status: 'awaiting-approval', message: proposal.message ?? 'The agent needs your input.' })
+          this.deps.emit({
+            status: 'awaiting-approval',
+            message: proposal.message ?? 'The agent needs your input.'
+          })
           this.deps.log({ type: 'runtime', message: `agent asked: ${proposal.message ?? ''}` })
+          break
+        }
+
+        // Loop guard: if the model keeps proposing the exact same action (scroll
+        // excepted — repeating scrolls is normal), stop instead of burning steps.
+        const sig = describe(proposal)
+        if (proposal.kind !== 'scroll' && sig === lastSig) repeatCount += 1
+        else {
+          repeatCount = 0
+          lastSig = sig
+        }
+        if (repeatCount + 1 >= MAX_REPEATS) {
+          const msg = `Stopping: repeated "${sig}" ${repeatCount + 1}× with no progress — the agent may be stuck.`
+          this.deps.log({ type: 'runtime', message: msg })
+          this.deps.emit({ status: 'error', message: msg })
           break
         }
 
@@ -105,7 +147,14 @@ export class AgentRuntime {
         let approved = true
         if (mode !== 'bypass') {
           const gate = evaluate({ proposal, mode, contract: this.deps.getContract(), agentView: view })
-          this.deps.log({ type: 'gate', message: gate.reason, action: proposal.kind, decision: gate.decision, risk: gate.risk, mode })
+          this.deps.log({
+            type: 'gate',
+            message: gate.reason,
+            action: proposal.kind,
+            decision: gate.decision,
+            risk: gate.risk,
+            mode
+          })
           if (gate.decision === 'block') {
             recent.push(`step ${step}: BLOCKED ${describe(proposal)} — ${gate.reason}`)
             this.deps.emit({ status: 'running', message: `Blocked: ${gate.reason}` })
@@ -151,6 +200,7 @@ export class AgentRuntime {
         const result = await this.deps.execute(proposal)
         this.deps.log({ type: 'action', message: result.detail, action: proposal.kind })
         let line = `step ${step}: ${describe(proposal)} -> ${result.ok ? 'ok' : 'FAIL'}: ${result.detail}`
+        let verifyConcern = ''
 
         // ── Verify ── best-effort; only when the action reported success.
         if (verify && result.ok && before) {
@@ -164,7 +214,10 @@ export class AgentRuntime {
             })
             line += ` | ${verdict.summary}`
             for (const w of verdict.warnings) line += `\n    ⚠ ${w}`
-            if (!verdict.ok || verdict.warnings.length) this.deps.emit({ status: 'running', message: verdict.summary })
+            if (!verdict.ok || verdict.warnings.length) {
+              this.deps.emit({ status: 'running', message: verdict.summary })
+              verifyConcern = verdict.warnings[0] ?? verdict.summary
+            }
           } catch {
             /* verification is best-effort — never block the loop on it */
           }
@@ -173,6 +226,22 @@ export class AgentRuntime {
         recent.push(line)
         if (recent.length > 8) recent.shift()
         this.deps.emit({ status: 'running', message: result.detail })
+
+        // Track the consecutive-failure streak and a concern to carry into a
+        // later 'done'. A clean success clears both.
+        if (result.ok) {
+          consecutiveFailures = 0
+          lastConcern = verifyConcern
+        } else {
+          consecutiveFailures += 1
+          lastConcern = `last action failed: ${result.detail.slice(0, 120)}`
+        }
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          const msg = `Stopping: ${consecutiveFailures} actions failed in a row — the agent appears stuck.`
+          this.deps.log({ type: 'runtime', message: msg })
+          this.deps.emit({ status: 'error', message: msg })
+          break
+        }
       }
 
       if (!this.stopped) {
@@ -189,7 +258,9 @@ export class AgentRuntime {
     const parts: string[] = []
     parts.push(`STEP ${step}/${MAX_STEPS}. PERMISSION_MODE: ${this.deps.getMode()}`)
     parts.push(`ORIGINAL_USER_PROMPT:\n${prompt}`)
-    parts.push(`LOCKED_TASK_CONTRACT:\n${contract ? JSON.stringify(contract, null, 2) : '(none — only low-risk actions are auto-allowed)'}`)
+    parts.push(
+      `LOCKED_TASK_CONTRACT:\n${contract ? JSON.stringify(contract, null, 2) : '(none — only low-risk actions are auto-allowed)'}`
+    )
     parts.push(`TAB_SUMMARIES:\n${this.deps.tabs.summaries()}`)
     parts.push(`RECENT_ACTIONS:\n${recent.length ? recent.join('\n') : '(none yet)'}`)
     parts.push(

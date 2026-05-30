@@ -3,7 +3,11 @@ import { normalizeActions, parseContract, fallbackContract } from '../src/main/a
 
 describe('normalizeActions', () => {
   it('keeps only known actions, lowercased and de-duplicated', () => {
-    expect(normalizeActions(['open', 'READ', 'Open', 'frobnicate', 'click'])).toEqual(['open', 'read', 'click'])
+    expect(normalizeActions(['open', 'READ', 'Open', 'frobnicate', 'click'])).toEqual([
+      'open',
+      'read',
+      'click'
+    ])
   })
 
   it('ignores non-arrays and non-string entries', () => {

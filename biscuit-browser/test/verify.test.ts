@@ -87,7 +87,11 @@ describe('verifyAction', () => {
   it('does NOT flag a rising invalid count for typeRef (partial input toggles :invalid)', () => {
     // textHash changes so it is detected as "changed"; the invalid bump must not
     // be reported as a failure for typing.
-    const v = verifyAction(sig({ invalidFields: 0, textHash: 1 }), sig({ invalidFields: 1, textHash: 2 }), type)
+    const v = verifyAction(
+      sig({ invalidFields: 0, textHash: 1 }),
+      sig({ invalidFields: 1, textHash: 2 }),
+      type
+    )
     expect(v.ok).toBe(true)
     expect(v.warnings.join(' ')).not.toMatch(/validation failed/i)
   })
