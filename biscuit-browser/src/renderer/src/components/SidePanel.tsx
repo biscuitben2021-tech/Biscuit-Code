@@ -2,28 +2,27 @@ import { ChatPanel } from '../panels/ChatPanel'
 import { ContractPanel } from '../panels/ContractPanel'
 import { AgentViewPanel } from '../panels/AgentViewPanel'
 import { ActionLogPanel } from '../panels/ActionLogPanel'
-import { ApprovalsPanel } from '../panels/ApprovalsPanel'
 import { SettingsPanel } from '../panels/SettingsPanel'
 import { StatusBar } from './StatusBar'
 
-export type PanelKey = 'chat' | 'contract' | 'agentView' | 'log' | 'approvals' | 'settings'
+// Approvals are handled inline in the Chat (Approve/Deny cards), so there is no
+// separate Approvals tab.
+export type PanelKey = 'chat' | 'contract' | 'agentView' | 'log' | 'settings'
 
 const TABS: [PanelKey, string][] = [
   ['chat', 'Chat'],
   ['contract', 'Contract'],
-  ['agentView', 'Agent View'],
-  ['log', 'Action Log'],
-  ['approvals', 'Approvals'],
+  ['agentView', 'View'],
+  ['log', 'Log'],
   ['settings', 'Settings']
 ]
 
 interface Props {
   active: PanelKey
   onSelect: (key: PanelKey) => void
-  approvalBadge?: number
 }
 
-export function SidePanel({ active, onSelect, approvalBadge }: Props): JSX.Element {
+export function SidePanel({ active, onSelect }: Props): JSX.Element {
   return (
     <div className="panel">
       <StatusBar />
@@ -31,7 +30,6 @@ export function SidePanel({ active, onSelect, approvalBadge }: Props): JSX.Eleme
         {TABS.map(([key, label]) => (
           <button key={key} className={active === key ? 'active' : ''} onClick={() => onSelect(key)}>
             {label}
-            {key === 'approvals' && approvalBadge ? ` (${approvalBadge})` : ''}
           </button>
         ))}
       </div>
@@ -40,7 +38,6 @@ export function SidePanel({ active, onSelect, approvalBadge }: Props): JSX.Eleme
         {active === 'contract' && <ContractPanel />}
         {active === 'agentView' && <AgentViewPanel />}
         {active === 'log' && <ActionLogPanel />}
-        {active === 'approvals' && <ApprovalsPanel />}
         {active === 'settings' && <SettingsPanel />}
       </div>
     </div>

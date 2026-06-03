@@ -1,5 +1,11 @@
 import { useEffect, useState } from 'react'
-import { PERMISSION_MODES, describeMode, type LlmProvider, type PermissionMode } from '@shared/types'
+import {
+  PERMISSION_MODES,
+  describeMode,
+  type LlmProvider,
+  type McpInfo,
+  type PermissionMode
+} from '@shared/types'
 import { patchState, useBiscuit } from '../state/store'
 
 const PRESETS: Record<LlmProvider, { label: string; baseUrl: string; model: string }> = {
@@ -27,6 +33,12 @@ export function SettingsPanel(): JSX.Element {
   const [expertMode, setExpertMode] = useState(false)
   const [apiKey, setApiKey] = useState('')
   const [saved, setSaved] = useState('')
+  const [mcp, setMcp] = useState<McpInfo | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    void window.biscuit.mcp.getInfo().then(setMcp)
+  }, [])
 
   useEffect(() => {
     if (!settings) return
@@ -136,8 +148,42 @@ export function SettingsPanel(): JSX.Element {
         {saved && <span style={{ color: 'var(--ok)' }}>{saved}</span>}
       </div>
 
+      <div className="section-title">Agent connection (MCP)</div>
       <p className="muted">
-        TODO(phase-later): connect to the Rust “biscuits” CLI as an alternative model backend (shared provider
+        Biscuit Browser runs a local <b>MCP server</b> so the Biscuits CLI and other AI agents can drive it —
+        reading the page as an Agent View and acting through the same Action Gate.
+      </p>
+      {mcp?.running ? (
+        <div className="field">
+          <label>MCP endpoint</label>
+          <div className="row">
+            <input readOnly value={mcp.url} onFocus={(e) => e.currentTarget.select()} />
+            <button
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(mcp.url)
+                  setCopied(true)
+                  window.setTimeout(() => setCopied(false), 1500)
+                } catch {
+                  /* clipboard unavailable */
+                }
+              }}
+            >
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+          <span className="muted">
+            Localhost only. In the Biscuits CLI, add it with <code>/mcp</code> (HTTP transport). Tools:
+            browser_get_agent_view, browser_open_url, browser_click, browser_type, browser_scroll,
+            browser_screenshot, browser_list_tabs, browser_new_tab, browser_status.
+          </span>
+        </div>
+      ) : (
+        <p className="muted">MCP server is starting…</p>
+      )}
+
+      <p className="muted">
+        TODO(phase-later): use the Rust “biscuits” CLI as an alternative model backend (shared provider
         config). See README.
       </p>
     </div>

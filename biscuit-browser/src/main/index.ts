@@ -13,7 +13,7 @@ function createWindow(): void {
     minWidth: 900,
     minHeight: 600,
     title: 'Biscuit Browser',
-    backgroundColor: '#1b1b1f',
+    backgroundColor: '#ffffff',
     show: false,
     webPreferences: {
       // The app UI renderer. Locked down: isolated context, no node, sandboxed.

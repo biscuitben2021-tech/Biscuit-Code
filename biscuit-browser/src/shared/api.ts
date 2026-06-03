@@ -6,6 +6,7 @@ import type {
   ChatMessage,
   ContractState,
   LogEntry,
+  McpInfo,
   PermissionMode,
   RuntimeUpdate,
   Settings,
@@ -70,6 +71,10 @@ export interface BiscuitApi {
   demo: {
     /** Run a scripted, model-free demo (contract + Action Gate decisions). */
     run(): Promise<void>
+  }
+  mcp: {
+    /** Info about the local MCP server that exposes the browser to AI agents. */
+    getInfo(): Promise<McpInfo>
   }
 
   // Event subscriptions (each returns an unsubscribe function).

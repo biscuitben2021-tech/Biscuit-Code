@@ -1999,6 +1999,9 @@ const HELP: &str = r#"commands:
   /computer-use             inspect/control the local GUI with screenshots
   /computer-use open <url>  open an app/site, wait, and capture a screenshot
   /computer-use click X Y   click screen coordinates and capture a screenshot
+  /browser                  show Biscuit Browser status
+  /browser use              install (if needed) and launch Biscuit Browser
+  /browser stop             stop the browser launched this session
   /mcp                      show MCP server help
   /mcp connect <name> -- <command>
                             add and start a stdio MCP server

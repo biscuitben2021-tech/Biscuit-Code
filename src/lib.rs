@@ -1,5 +1,6 @@
 mod activity;
 mod agent;
+mod browser;
 mod computer_use;
 mod evals;
 mod goals;
@@ -45,7 +46,7 @@ pub async fn run() -> Result<()> {
         println!("eval: biscuits eval --smoke");
         println!("harness: biscuits harness baseline|run|diff");
         println!(
-            "commands: /help, /clear, /remember, /forget, /memories, /handoff, /biscuits, /sessions, /resume, /last, /config, /shortcut, /goal, /plan, /observe, /computer-use, /mcp, /skills, /memory-mode, /privacy, /permissions"
+            "commands: /help, /clear, /remember, /forget, /memories, /handoff, /biscuits, /sessions, /resume, /last, /config, /shortcut, /goal, /plan, /observe, /computer-use, /browser, /mcp, /skills, /memory-mode, /privacy, /permissions"
         );
         return Ok(());
     }

@@ -1,6 +1,7 @@
 import { BrowserWindow, ipcMain } from 'electron'
 import type {
   ActionProposal,
+  ActionResult,
   AgentView,
   ApprovalRequest,
   ChatMessage,
@@ -19,6 +20,7 @@ import { AgentRuntime } from './agent/runtime'
 import { generateContract } from './agent/taskContract'
 import { evaluate } from './agent/actionGate'
 import { executeProposal } from './actions/execute'
+import { startMcpServer, type McpServerHandle } from './mcp/server'
 import type { LlmConfig } from './agent/llm'
 
 let chatSeq = 0
@@ -49,6 +51,12 @@ export class App {
   private readonly tabs: TabManager
   private readonly runtime: AgentRuntime
 
+  // MCP server (exposes the browser to external AI agents) + the last Agent View
+  // captured for a tool call, used to gate the next acting tool without
+  // re-extracting (which would invalidate the @refs the agent just received).
+  private mcp: McpServerHandle | null = null
+  private lastMcpView: AgentView | null = null
+
   constructor(
     private readonly win: BrowserWindow,
     private readonly settings: SettingsStore
@@ -72,6 +80,77 @@ export class App {
     })
     this.registerIpc()
     this.tabs.create()
+    void this.startMcp()
+  }
+
+  // ── MCP server ──────────────────────────────────────────────────────────
+  private async startMcp(): Promise<void> {
+    try {
+      this.mcp = await startMcpServer({
+        getAgentView: async () => {
+          const v = await this.tabs.getAgentView()
+          this.lastMcpView = v // cache for gating the next acting tool
+          return v
+        },
+        runAction: (proposal) => this.mcpRunAction(proposal),
+        screenshot: () => executeProposal(this.tabs, { kind: 'screenshot' }),
+        listTabs: () => this.tabs.list(),
+        newTab: (url) => this.tabs.create(url),
+        status: () => ({
+          mode: this.mode,
+          contract: this.contract.status,
+          running: this.runtime.isRunning()
+        }),
+        log: (message) => this.log.add({ type: 'system', message })
+      })
+      this.log.add({ type: 'system', message: `MCP server listening at ${this.mcp.url}` })
+    } catch (err) {
+      this.log.add({ type: 'system', message: `MCP server failed to start: ${(err as Error).message}` })
+    }
+  }
+
+  /**
+   * Run an acting proposal requested over MCP through the Action Gate, so an
+   * external agent is held to the same permission model as the built-in one.
+   * Uses the last Agent View captured by a tool call (not a fresh extract) so
+   * the @refs the agent is using stay valid.
+   */
+  private async mcpRunAction(proposal: ActionProposal): Promise<ActionResult> {
+    const mode = this.mode
+    const contract = this.contract.status === 'locked' ? this.contract.contract : null
+    if (mode !== 'bypass') {
+      const gate = evaluate({ proposal, mode, contract, agentView: this.lastMcpView })
+      this.log.add({
+        type: 'gate',
+        message: `mcp: ${gate.reason}`,
+        action: proposal.kind,
+        decision: gate.decision,
+        risk: gate.risk,
+        mode
+      })
+      if (gate.decision === 'block')
+        return { ok: false, detail: `blocked by the Action Gate: ${gate.reason}` }
+      if (gate.decision === 'ask') {
+        this.send(IPC.EVT_RUNTIME_UPDATE, {
+          status: 'awaiting-approval',
+          message: `MCP action needs approval: ${proposal.kind}`
+        })
+        const approved = await this.requestApproval(proposal, gate, 180_000)
+        if (!approved) return { ok: false, detail: `not approved by the user: ${gate.reason}` }
+      }
+    } else {
+      this.log.add({
+        type: 'gate',
+        message: 'mcp: bypass (no prompt)',
+        action: proposal.kind,
+        decision: 'allow',
+        risk: 'low',
+        mode
+      })
+    }
+    const result = await executeProposal(this.tabs, proposal)
+    this.log.add({ type: 'action', action: proposal.kind, message: `mcp: ${result.detail}` })
+    return result
   }
 
   // ── helpers ─────────────────────────────────────────────────────────────
@@ -175,12 +254,25 @@ export class App {
   }
 
   // ── approvals ─────────────────────────────────────────────────────────────
-  private requestApproval(proposal: ActionProposal, gate: GateResult): Promise<boolean> {
+  private requestApproval(proposal: ActionProposal, gate: GateResult, timeoutMs?: number): Promise<boolean> {
     this.apSeq += 1
     const id = `ap-${this.apSeq}`
     const request: ApprovalRequest = { id, proposal, gate }
     this.send(IPC.EVT_APPROVAL_REQUESTED, request)
-    return new Promise<boolean>((resolve) => this.approvals.set(id, resolve))
+    return new Promise<boolean>((resolve) => {
+      this.approvals.set(id, resolve)
+      // MCP-initiated approvals time out (auto-deny) so a tool call can't hang
+      // forever waiting on a human who isn't there.
+      if (timeoutMs && timeoutMs > 0) {
+        setTimeout(() => {
+          if (this.approvals.has(id)) {
+            this.approvals.delete(id)
+            this.send(IPC.EVT_APPROVAL_RESOLVED, { id })
+            resolve(false)
+          }
+        }, timeoutMs)
+      }
+    })
   }
 
   private resolveApproval(id: string, approved: boolean): void {
@@ -286,6 +378,11 @@ export class App {
     // Chat starts/continues a task. (RUNTIME_STOP is the emergency stop.)
     h(IPC.CHAT_SEND, (_e, message: string) => this.startTask(message))
     h(IPC.DEMO_RUN, () => this.runDemo())
+    h(IPC.MCP_GET_INFO, () => ({
+      running: this.mcp !== null,
+      url: this.mcp?.url ?? '',
+      port: this.mcp?.port ?? 0
+    }))
     h(IPC.RUNTIME_STOP, () => {
       this.runtime.stop()
       this.cancelApprovals()
@@ -425,6 +522,7 @@ export class App {
 
   destroy(): void {
     this.runtime.stop()
+    void this.mcp?.close()
     this.tabs.destroy()
   }
 }

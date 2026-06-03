@@ -50,6 +50,9 @@ export const IPC = {
   // Demo mode (no API key): scripted contract + gate decisions
   DEMO_RUN: 'demo:run',
 
+  // MCP server (exposes the browser to external AI agents)
+  MCP_GET_INFO: 'mcp:getInfo',
+
   // ── Events (main -> renderer) ──
   EVT_TABS_CHANGED: 'evt:tabsChanged',
   EVT_CONTRACT_CHANGED: 'evt:contractChanged',

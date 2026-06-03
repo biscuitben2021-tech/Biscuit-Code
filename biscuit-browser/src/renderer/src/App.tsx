@@ -26,8 +26,6 @@ export function App(): JSX.Element {
   }, [])
 
   const activeTab = state.tabs.find((t) => t.id === state.activeTabId) ?? null
-  // Surface attention on tabs that need the user.
-  const badge = state.approvals.length > 0 ? state.approvals.length : undefined
   const expertMode = state.settings?.expertMode ?? false
   const bypassArmed = state.mode === 'bypass'
   const running = state.runtime?.status === 'running' || state.runtime?.status === 'awaiting-approval'
@@ -76,7 +74,7 @@ export function App(): JSX.Element {
           />
           <BrowserViewport hasTab={!!activeTab} hidden={modalOpen} />
         </div>
-        <SidePanel active={panel} onSelect={setPanel} approvalBadge={badge} />
+        <SidePanel active={panel} onSelect={setPanel} />
       </div>
       <BypassConfirmModal
         open={bypassModal}

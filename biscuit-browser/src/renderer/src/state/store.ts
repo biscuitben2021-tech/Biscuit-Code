@@ -9,6 +9,7 @@ import type {
   Settings,
   TabState
 } from '@shared/types'
+import { contractToTodo } from '../contractText'
 
 export interface AppState {
   tabs: TabState[]
@@ -57,6 +58,9 @@ function sysMessage(role: ChatMessage['role'], text: string): ChatMessage {
   return { id: `r-${Date.now()}-${seq}`, role, text, ts: Date.now() }
 }
 
+// Avoid re-posting the same task plan to the chat on every contract event.
+let lastContractSig = ''
+
 let inited = false
 export async function init(): Promise<void> {
   if (inited) return
@@ -65,15 +69,42 @@ export async function init(): Promise<void> {
 
   b.onTabsChanged((tabs) => set({ tabs, activeTabId: tabs.find((t) => t.active)?.id ?? null }))
   b.onModeChanged((mode) => set({ mode }))
-  b.onContractChanged((contract) => set({ contract }))
+  b.onContractChanged((contract) => {
+    set({ contract })
+    // Surface the plan in the chat as a plain-text to-do (not JSON) when it is
+    // proposed (draft) or locked, de-duplicated so it isn't re-posted.
+    if ((contract.status === 'draft' || contract.status === 'locked') && contract.contract) {
+      const sig = `${contract.status}|${JSON.stringify(contract.contract)}`
+      if (sig !== lastContractSig) {
+        lastContractSig = sig
+        const head =
+          contract.status === 'draft'
+            ? '📋 Here’s the task plan — review it in the Contract tab, then Lock & Start:'
+            : '📋 Task plan locked — starting:'
+        set({
+          chat: [
+            ...getState().chat,
+            sysMessage('assistant', `${head}\n\n${contractToTodo(contract.contract)}`)
+          ]
+        })
+      }
+    } else if (contract.status === 'none') {
+      lastContractSig = ''
+    }
+  })
   b.onLogAppended((entry) => set({ logs: [...getState().logs, entry].slice(-1000) }))
   b.onApprovalRequested((req) => set({ approvals: [...getState().approvals, req] }))
   b.onApprovalResolved(({ id }) => set({ approvals: getState().approvals.filter((a) => a.id !== id) }))
   b.onChatMessage((m) => set({ chat: [...getState().chat, m] }))
   b.onRuntimeUpdate((update) => {
-    const chat = update.message
-      ? [...getState().chat, sysMessage('assistant', `[${update.status}] ${update.message}`)]
-      : getState().chat
+    // Keep the chat clean (ChatGPT-style): per-step "running" updates drive the
+    // live "working…" indicator only; just the agent's final/awaiting messages
+    // become assistant turns. The Action Log keeps the full step-by-step trace.
+    const surface = update.status === 'done' || update.status === 'error' || update.status === 'stopped'
+    const chat =
+      surface && update.message
+        ? [...getState().chat, sysMessage('assistant', update.message)]
+        : getState().chat
     set({ runtime: update, chat })
   })
 

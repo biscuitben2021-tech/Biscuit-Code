@@ -17,13 +17,19 @@ interface Props {
   onArmBypass: () => void
 }
 
+// The welcome page is a long data: URL — show a clean, empty bar there instead.
+function displayUrl(url?: string): string {
+  if (!url || url.startsWith('data:text/html')) return ''
+  return url
+}
+
 export function Toolbar({ activeTab, mode, runtime, expertMode, onArmBypass }: Props): JSX.Element {
   const [address, setAddress] = useState('')
   const [editing, setEditing] = useState(false)
 
   // Keep the address bar in sync with the active tab unless the user is typing.
   useEffect(() => {
-    if (!editing) setAddress(activeTab?.url ?? '')
+    if (!editing) setAddress(displayUrl(activeTab?.url))
   }, [activeTab?.url, activeTab?.id, editing])
 
   const go = (): void => {
@@ -70,7 +76,7 @@ export function Toolbar({ activeTab, mode, runtime, expertMode, onArmBypass }: P
             if (e.key === 'Enter') go()
             if (e.key === 'Escape') {
               setEditing(false)
-              setAddress(activeTab?.url ?? '')
+              setAddress(displayUrl(activeTab?.url))
             }
           }}
         />

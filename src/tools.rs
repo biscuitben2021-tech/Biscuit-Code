@@ -1,5 +1,5 @@
 use crate::{
-    computer_use::ComputerUseRuntime, goals::GoalStore, mcp::McpManager,
+    browser::BrowserRuntime, computer_use::ComputerUseRuntime, goals::GoalStore, mcp::McpManager,
     observations::ObservationSystem, skills::SkillStore,
 };
 use anyhow::{bail, Context, Result};
@@ -25,6 +25,7 @@ pub struct ToolRuntime {
     computer_use: ComputerUseRuntime,
     mcp: McpManager,
     skills: SkillStore,
+    browser: BrowserRuntime,
     monitors: HashMap<u64, Monitor>,
     next_monitor: u64,
 }
@@ -130,6 +131,7 @@ impl ToolRuntime {
         let computer_use = ComputerUseRuntime::new(workspace.clone());
         let mcp = McpManager::open(&workspace)?;
         let skills = SkillStore::open(&workspace)?;
+        let browser = BrowserRuntime::new(&workspace);
         Ok(Self {
             workspace,
             goals,
@@ -137,6 +139,7 @@ impl ToolRuntime {
             computer_use,
             mcp,
             skills,
+            browser,
             monitors: HashMap::new(),
             next_monitor: 1,
         })
@@ -193,6 +196,9 @@ Use Read before editing files you have not inspected. Prefer Edit for precise ch
             return Ok(Some(output));
         }
         if let Some(output) = self.computer_use.command_output(input)? {
+            return Ok(Some(output));
+        }
+        if let Some(output) = self.browser.command_output(input)? {
             return Ok(Some(output));
         }
         if let Some(output) = self.mcp.command_output(input)? {

@@ -61,6 +61,9 @@ const api: BiscuitApi = {
   demo: {
     run: () => ipcRenderer.invoke(IPC.DEMO_RUN)
   },
+  mcp: {
+    getInfo: () => ipcRenderer.invoke(IPC.MCP_GET_INFO)
+  },
 
   onTabsChanged: (cb) => on(IPC.EVT_TABS_CHANGED, cb),
   onContractChanged: (cb) => on(IPC.EVT_CONTRACT_CHANGED, cb),

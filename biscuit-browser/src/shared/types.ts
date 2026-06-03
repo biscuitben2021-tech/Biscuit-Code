@@ -270,6 +270,14 @@ export interface RuntimeUpdate {
   message: string
 }
 
+// ── MCP server ──────────────────────────────────────────────────────────────
+/** Status of the local MCP server that exposes the browser to external agents. */
+export interface McpInfo {
+  running: boolean
+  url: string
+  port: number
+}
+
 // ── Chat ────────────────────────────────────────────────────────────────────
 export interface ChatMessage {
   id: string

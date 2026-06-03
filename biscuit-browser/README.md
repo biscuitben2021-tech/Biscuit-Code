@@ -186,6 +186,39 @@ incl. shadow DOM + sensitive-field detection), the verification layer, and the
 model-output JSON extractor — **69 tests**. Adding a fixture page to the
 extractor tests is a great first contribution.
 
+## Drive it from another AI agent (MCP)
+
+Biscuit Browser runs a local **MCP server** (JSON-RPC over HTTP, bound to
+`127.0.0.1`) so the Biscuits CLI and other AI agents can use the browser as a
+tool — reading pages as an Agent View and acting through the **same Action
+Gate**. The endpoint is shown in **Settings → Agent connection (MCP)** (default
+`http://127.0.0.1:8765/mcp`).
+
+Tools exposed:
+
+| Tool | What it does |
+| --- | --- |
+| `browser_get_agent_view` | The structured page (text + `@e` refs). Call this first. |
+| `browser_open_url` | Navigate (gated). |
+| `browser_click` / `browser_type` | Act on an `@e` ref (gated). |
+| `browser_scroll` | Scroll the page. |
+| `browser_screenshot` | PNG fallback. |
+| `browser_list_tabs` / `browser_new_tab` | Tab management. |
+| `browser_status` | Current mode / contract / running. |
+
+Acting tools pass the permission gate, so an external agent is held to the same
+rules as the built-in one: in Assisted/Auto a high-risk tool call surfaces an
+approval in the **Approvals** panel (auto-denied after 3 min if ignored); in
+Safe it asks for most; in Bypass it runs unprompted. Reading tools are free.
+
+**Connect from the Biscuits CLI:** run `/mcp` and add the HTTP endpoint above.
+Because the browser is a self-contained plugin, this is the seam through which
+the Rust CLI (or Claude, or any MCP client) drives it — no code coupling.
+
+> Localhost-only and unauthenticated in V1 — browsers can't reach it
+> (cross-origin), but treat it as a local-trust surface. A bearer token is on
+> the roadmap.
+
 ## Architecture
 
 ```

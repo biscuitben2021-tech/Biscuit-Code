@@ -4,8 +4,11 @@ import type { ViewBounds } from '@shared/ipc'
 import { normalizeUrl } from '@shared/url'
 import { runExtract } from './actions/browserActions'
 import { buildSignatureScript, type RawSignature } from './agent-view/signature'
+import { WELCOME_URL } from './welcome'
 
-const DEFAULT_HOME = 'https://duckduckgo.com/'
+// New tabs open on the Biscuit Browser welcome page (a self-contained data: URL),
+// not a search engine. Loaded directly (it bypasses normalizeUrl on purpose).
+const DEFAULT_HOME = WELCOME_URL
 // Dedicated, persistent session for browsed pages — fully separate from the
 // app UI's session so cookies/storage never mix with the renderer.
 const BROWSE_PARTITION = 'persist:biscuit-web'
