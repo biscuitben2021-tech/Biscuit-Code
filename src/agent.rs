@@ -46,17 +46,18 @@ pub async fn run_turn(
     history.push(Msg::new("user", prompt));
     let change_snapshot = memory.change_snapshot()?;
 
-    for _ in 0..8 {
+    // Max tool-planning rounds per turn. The old cap of 8 silently truncated
+    // any task needing more steps (the model just stopped getting tools and was
+    // forced to answer). A turn can still emit multiple tool calls per round.
+    const MAX_TOOL_ROUNDS: usize = 25;
+    for _ in 0..MAX_TOOL_ROUNDS {
         if perms.stop_requested.load(Ordering::Relaxed) {
             if print_final {
-                println!("\n[stopped] agent halted by user");
+                println!("\n{}", crate::ui::stopped("halted by user"));
             }
             break;
         }
         capture.loop_count += 1;
-        if print_final {
-            println!("\n[working] planning next action...");
-        }
         let memory_context = memory.system_context(prompt)?;
         // Recompute each iteration: a tool call this turn (e.g. /skills disable)
         // can change which skills are enabled, so this must not be cached.
@@ -67,16 +68,27 @@ pub async fn run_turn(
             &skills_context,
             extra_system_context,
         ]);
+        // Animated spinner while the model plans (a blocking, non-streaming
+        // request); cleared the moment the plan arrives.
+        let spinner = print_final.then(|| crate::ui::Spinner::start("thinking…"));
         let plan = llm::complete_history(client, config, &tool_system, history).await?;
-        let calls = tools::parse_calls(&plan)?;
-        if calls.is_empty() {
+        if let Some(spinner) = spinner {
+            spinner.stop();
+        }
+        let parsed = tools::parse_calls(&plan);
+        if parsed.calls.is_empty() && parsed.errors.is_empty() {
             break;
         }
 
         history.push(Msg::new("assistant", plan.clone()));
         memory.save_turn("assistant", &format!("[tool request]\n{plan}"))?;
 
-        for call in calls {
+        for call in parsed.calls {
+            // Honor a Ctrl-C that arrived mid-round so we stop before firing the
+            // next tool rather than draining the whole batch.
+            if perms.stop_requested.load(Ordering::Relaxed) {
+                break;
+            }
             capture.ordered_tool_calls.push(call.tool.clone());
             if print_final {
                 if call.needs_user_input() || call.needs_permission_input(perms) {
@@ -118,6 +130,18 @@ pub async fn run_turn(
             history.push(Msg::new("user", msg.clone()));
             memory.save_turn("tool", &msg)?;
         }
+
+        // Hand malformed tool-call blocks back to the model so it can correct
+        // itself, instead of the turn silently dropping them (or, previously,
+        // erroring out the whole turn on the first bad block).
+        for err in &parsed.errors {
+            let msg = format!(
+                "<tool_result>\ntool call parse error: {err}\nfix the JSON and re-emit the tool call\n</tool_result>"
+            );
+            capture.tool_results.push(format!("parse error: {err}"));
+            history.push(Msg::new("user", msg.clone()));
+            memory.save_turn("tool", &msg)?;
+        }
     }
 
     activity.stop_listening();
@@ -134,7 +158,7 @@ pub async fn run_turn(
     );
     let input_chars = system_context.len() + history.iter().map(|m| m.text.len()).sum::<usize>();
     if print_final {
-        print!("biscuits> ");
+        println!("\n{}", crate::ui::assistant_header());
         io::stdout().flush()?;
     }
     let (answer, usage) = if print_final {

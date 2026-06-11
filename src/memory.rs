@@ -251,6 +251,12 @@ impl MemoryStore {
     }
 
     pub fn log_changes(&self, before: &ChangeSnapshot, user: &str) -> Result<()> {
+        // In ephemeral/incognito the user expects nothing written to disk, but
+        // the change log would otherwise persist their prompt and full file
+        // diffs (including new-file contents) to biscuit/logs.md.
+        if self.settings.privacy != PrivacyMode::Normal {
+            return Ok(());
+        }
         let after = ChangeSnapshot::capture(&self.workspace)?;
         let diff = before.diff(&after);
         if diff.is_empty() {
@@ -1356,15 +1362,31 @@ fn collect_change_snapshot(root: &Path, dir: &Path, snapshot: &mut ChangeSnapsho
         snapshot.truncated = true;
         return Ok(());
     }
-    for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
+    // Tolerate per-entry errors and skip symlinks (see collect_snapshot in
+    // observations.rs): a single propagated error here used to crash the whole
+    // REPL via the `?` in run_turn, and is_dir() following a symlink cycle would
+    // overflow the stack on every tool call.
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
         if skip_log_snapshot_path(root, &path) {
             continue;
         }
-        if path.is_dir() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             collect_change_snapshot(root, &path, snapshot)?;
-        } else if path.is_file() {
-            let metadata = fs::metadata(&path)?;
+        } else if file_type.is_file() {
+            let Ok(metadata) = fs::metadata(&path) else {
+                continue;
+            };
             let modified_nanos = metadata
                 .modified()
                 .ok()
@@ -1635,13 +1657,32 @@ where
         return Ok(T::default());
     }
     let text = fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&text).unwrap_or_default())
+    match serde_json::from_str(&text) {
+        Ok(value) => Ok(value),
+        Err(err) => {
+            // Never silently discard a corrupt file and then overwrite it with an
+            // empty default (which permanently destroys the user's memories).
+            // Back the original up and start fresh, loudly.
+            let backup = path.with_extension("corrupt.bak");
+            let _ = fs::rename(path, &backup);
+            eprintln!(
+                "warning: {} could not be parsed ({err}); backed up to {} and starting fresh",
+                path.display(),
+                backup.display()
+            );
+            Ok(T::default())
+        }
+    }
 }
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    let mut file = fs::File::create(path)?;
-    file.write_all(serde_json::to_string_pretty(value)?.as_bytes())?;
-    file.write_all(b"\n")?;
+    // Atomic write: serialize to a sibling temp file then rename over the target,
+    // so a crash/kill mid-write can't leave a truncated or empty file behind.
+    let mut json = serde_json::to_string_pretty(value)?;
+    json.push('\n');
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, json.as_bytes())?;
+    fs::rename(&tmp, path)?;
     Ok(())
 }
 

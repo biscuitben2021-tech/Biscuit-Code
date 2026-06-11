@@ -296,15 +296,33 @@ fn collect_snapshot(root: &Path, dir: &Path, snapshot: &mut WorkspaceSnapshot) -
         snapshot.truncated = true;
         return Ok(());
     }
-    for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
+    // Tolerate per-entry errors (a file vanishing mid-scan, an unreadable
+    // subdirectory) instead of propagating: a single failure here used to empty
+    // the whole snapshot, making the agent believe every file was deleted.
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
         if skip_path(root, &path) {
             continue;
         }
-        if path.is_dir() {
+        // Use the dirent's own type and skip symlinks: is_dir() follows symlinks,
+        // so a symlink cycle (`ln -s . loop`) would recurse until stack overflow
+        // and an out-of-workspace symlink would pull in external files.
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             collect_snapshot(root, &path, snapshot)?;
-        } else if path.is_file() {
-            let metadata = fs::metadata(&path)?;
+        } else if file_type.is_file() {
+            let Ok(metadata) = fs::metadata(&path) else {
+                continue;
+            };
             let rel_path = rel(root, &path);
             let modified_nanos = metadata
                 .modified()

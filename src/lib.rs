@@ -13,6 +13,7 @@ mod shell;
 mod skills;
 mod test_harness;
 mod tools;
+mod ui;
 
 use anyhow::Result;
 use llm::Msg;
@@ -57,25 +58,52 @@ pub async fn run() -> Result<()> {
     let mut memory = MemoryStore::open(workspace.clone())?;
     let mut tools = tools::ToolRuntime::new(workspace.clone())?;
     let mut perms = PermissionGuard::open(&workspace);
+
+    // Ctrl-C handling: during a turn it requests a halt that the agent loop
+    // polls; at the idle prompt it exits the process. It runs on a worker thread
+    // so it still fires while the main task is blocked on stdin (the default
+    // multi-thread runtime makes this work).
+    let turn_active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let stop_flag = perms.stop_requested.clone();
+        let active = turn_active.clone();
+        tokio::spawn(async move {
+            use std::sync::atomic::Ordering::Relaxed;
+            while tokio::signal::ctrl_c().await.is_ok() {
+                if active.load(Relaxed) {
+                    stop_flag.store(true, Relaxed);
+                    eprintln!("\n[stopping] halting after the current step…");
+                } else {
+                    eprintln!();
+                    std::process::exit(0);
+                }
+            }
+        });
+    }
+
     let mut history = Vec::<Msg>::new();
     let mut totals = llm::Totals::default();
     let mut line = String::new();
 
-    println!("\n🍪 Biscuits v{}", env!("CARGO_PKG_VERSION"));
-    println!("workspace: {}", env::current_dir()?.display());
-    println!("memory: {}", memory.root().display());
-    println!(
-        "permissions: {} — {}",
+    ui::banner(
+        env!("CARGO_PKG_VERSION"),
+        &env::current_dir()?.display().to_string(),
+        &memory.root().display().to_string(),
         perms.mode.label(),
-        perms.mode.subtitle()
+        perms.mode.subtitle(),
     );
-    println!("type /help for commands, /exit to quit\n");
 
     loop {
         line.clear();
-        print!("you> ");
+        print!("{}", ui::user_prompt());
         io::stdout().flush()?;
-        io::stdin().read_line(&mut line)?;
+        let read = io::stdin().read_line(&mut line)?;
+        if read == 0 {
+            // EOF (Ctrl-D or closed/piped stdin): exit cleanly instead of
+            // spinning forever on an empty prompt.
+            println!();
+            break;
+        }
 
         let prompt = line.trim();
         if prompt.is_empty() {
@@ -112,7 +140,11 @@ pub async fn run() -> Result<()> {
             .stop_requested
             .store(false, std::sync::atomic::Ordering::Relaxed);
         let extra_context = test_harness::baseline_context(&workspace);
-        let capture = agent::run_turn(
+        turn_active.store(true, std::sync::atomic::Ordering::Relaxed);
+        // A turn error (transient API failure, malformed model output, a snapshot
+        // I/O hiccup) must not crash the whole REPL and discard the session —
+        // report it and keep going.
+        let turn_result = agent::run_turn(
             &client,
             &config,
             &mut memory,
@@ -123,8 +155,16 @@ pub async fn run() -> Result<()> {
             &extra_context,
             true,
         )
-        .await?;
-        llm::print_usage_snapshot(capture.token_usage, &mut totals);
+        .await;
+        turn_active.store(false, std::sync::atomic::Ordering::Relaxed);
+        match turn_result {
+            Ok(capture) => {
+                llm::print_usage_snapshot(capture.token_usage, &mut totals);
+            }
+            Err(err) => {
+                eprintln!("\n{}", ui::error(&err.to_string()));
+            }
+        }
         println!();
     }
 

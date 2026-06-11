@@ -342,6 +342,11 @@ Use Read before editing files you have not inspected. Prefer Edit for precise ch
         self.ensure_not_biscuit_log(&path)?;
         let old = str_arg(args, "old")?;
         let new = str_arg(args, "new")?;
+        if old.is_empty() {
+            // "".matches("") is text.len()+1, so an empty `old` with replace_all
+            // would splice `new` between every character and destroy the file.
+            bail!("old text must not be empty");
+        }
         let replace_all = bool_arg(args, "replace_all", false);
         let text = fs::read_to_string(&path)?;
         let count = text.matches(old).count();
@@ -365,14 +370,38 @@ Use Read before editing files you have not inspected. Prefer Edit for precise ch
     }
 
     fn bash(&self, args: &Value) -> Result<String> {
+        use std::io::Read;
         let command = str_arg(args, "command")?;
         let timeout = u64_arg(args, "timeout_secs", 60).min(600);
-        let mut child = crate::shell::command(command)
-            .current_dir(&self.workspace)
+        let mut cmd = crate::shell::command(command);
+        cmd.current_dir(&self.workspace)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        crate::shell::spawn_in_own_group(&mut cmd);
+        let mut child = cmd
             .spawn()
             .with_context(|| format!("failed to run command: {command}"))?;
+
+        // Drain stdout/stderr concurrently on threads. Reading only after the
+        // child exits (the old behavior) deadlocks any command that writes more
+        // than the OS pipe buffer (~64 KB) before exiting, because the child
+        // blocks on write() with no reader and never reaches exit.
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let out_handle = thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut s) = stdout {
+                let _ = s.read_to_end(&mut buf);
+            }
+            buf
+        });
+        let err_handle = thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut s) = stderr {
+                let _ = s.read_to_end(&mut buf);
+            }
+            buf
+        });
 
         let start = Instant::now();
         let mut timed_out = false;
@@ -382,19 +411,21 @@ Use Read before editing files you have not inspected. Prefer Edit for precise ch
             }
             if start.elapsed() > Duration::from_secs(timeout) {
                 timed_out = true;
-                let _ = child.kill();
+                crate::shell::kill_tree(&mut child);
                 break;
             }
             thread::sleep(Duration::from_millis(50));
         }
 
-        let output = child.wait_with_output()?;
+        let status = child.wait()?;
+        let stdout_bytes = out_handle.join().unwrap_or_default();
+        let stderr_bytes = err_handle.join().unwrap_or_default();
         Ok(format!(
             "command: {command}\nstatus: {}\ntimed_out: {}\nstdout:\n{}\nstderr:\n{}",
-            output.status,
+            status,
             timed_out,
-            truncate(&String::from_utf8_lossy(&output.stdout), 16_000),
-            truncate(&String::from_utf8_lossy(&output.stderr), 16_000)
+            truncate(&String::from_utf8_lossy(&stdout_bytes), 16_000),
+            truncate(&String::from_utf8_lossy(&stderr_bytes), 16_000)
         ))
     }
 
@@ -616,8 +647,31 @@ Use Read before editing files you have not inspected. Prefer Edit for precise ch
     }
 
     fn new_path(&self, path: &str) -> Result<PathBuf> {
-        let path = self.workspace.join(path);
-        let parent = path.parent().unwrap_or(&self.workspace);
+        use std::path::Component;
+        let joined = self.workspace.join(path);
+        // Lexically resolve `.`/`..` WITHOUT touching the filesystem. The old
+        // code only canonicalized the deepest *existing* ancestor and returned
+        // the un-normalized path, so `x/../../../../tmp/evil` (where `x` does
+        // not exist yet) passed the check, then create_dir_all made `x` real and
+        // fs::write followed the `..` chain out of the workspace.
+        let mut normalized = PathBuf::new();
+        for comp in joined.components() {
+            match comp {
+                Component::ParentDir => {
+                    if !normalized.pop() {
+                        bail!("path is outside workspace");
+                    }
+                }
+                Component::CurDir => {}
+                other => normalized.push(other.as_os_str()),
+            }
+        }
+        if !normalized.starts_with(&self.workspace) {
+            bail!("path is outside workspace");
+        }
+        // Also canonicalize the deepest existing ancestor to catch symlink
+        // escapes (a real symlink inside the workspace pointing elsewhere).
+        let parent = normalized.parent().unwrap_or(&self.workspace);
         let mut existing = parent;
         while !existing.exists() {
             existing = existing.parent().context("path has no existing parent")?;
@@ -625,7 +679,7 @@ Use Read before editing files you have not inspected. Prefer Edit for precise ch
         if !existing.canonicalize()?.starts_with(&self.workspace) {
             bail!("path is outside workspace");
         }
-        Ok(path)
+        Ok(normalized)
     }
 }
 
@@ -637,34 +691,60 @@ impl Drop for ToolRuntime {
     }
 }
 
-pub fn parse_calls(text: &str) -> Result<Vec<ToolCall>> {
-    let mut calls = Vec::new();
-    let re = Regex::new(r"(?s)<tool_call>\s*(.*?)\s*</tool_call>")?;
-    for cap in re.captures_iter(text) {
-        calls.push(json_to_call(&cap[1])?);
-    }
-    if !calls.is_empty() {
-        return Ok(calls);
-    }
+pub struct ParsedCalls {
+    pub calls: Vec<ToolCall>,
+    pub errors: Vec<String>,
+}
 
-    let re = Regex::new(r"(?s)<tool_calls>\s*(.*?)\s*</tool_calls>")?;
-    if let Some(cap) = re.captures(text) {
-        let v: Value = serde_json::from_str(cap[1].trim())?;
-        if let Some(xs) = v.as_array() {
-            for x in xs {
-                calls.push(value_to_call(x.clone())?);
+/// Parse tool calls out of a model plan. Never fails the whole turn on a single
+/// malformed block (every provider's model occasionally emits slightly-off JSON):
+/// valid calls are returned and parse errors are collected so the agent loop can
+/// hand them back to the model for self-correction.
+pub fn parse_calls(text: &str) -> ParsedCalls {
+    let mut calls = Vec::new();
+    let mut errors = Vec::new();
+
+    if let Ok(re) = Regex::new(r"(?s)<tool_call>\s*(.*?)\s*</tool_call>") {
+        for cap in re.captures_iter(text) {
+            match json_to_call(&cap[1]) {
+                Ok(call) => calls.push(call),
+                Err(err) => errors.push(err.to_string()),
             }
         }
     }
-    if !calls.is_empty() {
-        return Ok(calls);
+    if !calls.is_empty() || !errors.is_empty() {
+        return ParsedCalls { calls, errors };
+    }
+
+    if let Ok(re) = Regex::new(r"(?s)<tool_calls>\s*(.*?)\s*</tool_calls>") {
+        if let Some(cap) = re.captures(text) {
+            match serde_json::from_str::<Value>(cap[1].trim()) {
+                Ok(v) => {
+                    if let Some(xs) = v.as_array() {
+                        for x in xs {
+                            match value_to_call(x.clone()) {
+                                Ok(call) => calls.push(call),
+                                Err(err) => errors.push(err.to_string()),
+                            }
+                        }
+                    }
+                }
+                Err(err) => errors.push(err.to_string()),
+            }
+        }
+    }
+    if !calls.is_empty() || !errors.is_empty() {
+        return ParsedCalls { calls, errors };
     }
 
     let trimmed = text.trim();
     if trimmed.starts_with('{') && trimmed.contains("\"tool\"") {
-        calls.push(json_to_call(trimmed)?);
+        match json_to_call(trimmed) {
+            Ok(call) => calls.push(call),
+            Err(err) => errors.push(err.to_string()),
+        }
     }
-    Ok(calls)
+    ParsedCalls { calls, errors }
 }
 
 pub fn brief(text: &str) -> String {
@@ -829,5 +909,34 @@ fn truncate(text: &str, max: usize) -> String {
         text.to_string()
     } else {
         format!("{}...", text.chars().take(max).collect::<String>())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_calls_collects_errors_instead_of_panicking() {
+        let parsed = parse_calls("<tool_call>{ not valid json }</tool_call>");
+        assert!(parsed.calls.is_empty());
+        assert!(!parsed.errors.is_empty());
+    }
+
+    #[test]
+    fn parse_calls_reads_a_valid_block() {
+        let parsed = parse_calls("<tool_call>{\"tool\":\"read\",\"path\":\"x\"}</tool_call>");
+        assert_eq!(parsed.calls.len(), 1);
+        assert_eq!(parsed.calls[0].tool, "read");
+        assert!(parsed.errors.is_empty());
+    }
+
+    #[test]
+    fn parse_calls_keeps_valid_and_reports_invalid_together() {
+        let text = "<tool_call>{\"tool\":\"read\",\"path\":\"a\"}</tool_call>\
+                    <tool_call>{bad}</tool_call>";
+        let parsed = parse_calls(text);
+        assert_eq!(parsed.calls.len(), 1);
+        assert_eq!(parsed.errors.len(), 1);
     }
 }

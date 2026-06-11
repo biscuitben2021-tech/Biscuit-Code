@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     fs,
-    io::Write,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -90,14 +89,34 @@ impl GoalStore {
         let root = workspace.join(".biscuits");
         fs::create_dir_all(&root)?;
         let path = root.join("goal_plan.json");
+        let mut clobbered = false;
         let state = if path.exists() {
             let text = fs::read_to_string(&path)?;
-            serde_json::from_str(&text).unwrap_or_default()
+            match serde_json::from_str(&text) {
+                Ok(state) => state,
+                Err(err) => {
+                    // Preserve a corrupt/hand-edited file instead of silently
+                    // resetting and overwriting it on the next save.
+                    let backup = path.with_extension("corrupt.bak");
+                    let _ = fs::rename(&path, &backup);
+                    eprintln!(
+                        "warning: {} could not be parsed ({err}); backed up to {} and starting fresh",
+                        path.display(),
+                        backup.display()
+                    );
+                    clobbered = true;
+                    GoalPlanState::default()
+                }
+            }
         } else {
             GoalPlanState::default()
         };
         let store = Self { path, state };
-        store.save()?;
+        // Only write on first creation or after backing up a corrupt file; don't
+        // rewrite a healthy file just because we opened it.
+        if !store.path.exists() || clobbered {
+            store.save()?;
+        }
         Ok(store)
     }
 
@@ -511,9 +530,12 @@ Current goal and plan:
     }
 
     fn save(&self) -> Result<()> {
-        let mut file = fs::File::create(&self.path)?;
-        file.write_all(serde_json::to_string_pretty(&self.state)?.as_bytes())?;
-        file.write_all(b"\n")?;
+        // Atomic write so a crash mid-save can't truncate goal_plan.json.
+        let mut json = serde_json::to_string_pretty(&self.state)?;
+        json.push('\n');
+        let tmp = self.path.with_extension("json.tmp");
+        fs::write(&tmp, json.as_bytes())?;
+        fs::rename(&tmp, &self.path)?;
         Ok(())
     }
 }

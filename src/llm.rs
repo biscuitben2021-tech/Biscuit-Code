@@ -646,6 +646,25 @@ async fn first_openai_model(client: &Client, config: &Config) -> Result<String> 
         .context("no loaded models found; load a model in LM Studio first")
 }
 
+/// Collapse consecutive same-role messages into one. A single assistant tool
+/// plan can produce several `user` tool-result messages in a row; Anthropic and
+/// Gemini reject non-alternating roles with HTTP 400, so every provider gets a
+/// merged, strictly-alternating history and behaves identically.
+fn merge_adjacent(history: &[Msg]) -> Vec<(&'static str, String)> {
+    let mut out: Vec<(&'static str, String)> = Vec::new();
+    for m in history {
+        if let Some(last) = out.last_mut() {
+            if last.0 == m.role {
+                last.1.push_str("\n\n");
+                last.1.push_str(&m.text);
+                continue;
+            }
+        }
+        out.push((m.role, m.text.clone()));
+    }
+    out
+}
+
 fn openai_request(
     client: &Client,
     config: &Config,
@@ -655,9 +674,9 @@ fn openai_request(
 ) -> RequestBuilder {
     let mut messages = vec![json!({ "role": "system", "content": system_context })];
     messages.extend(
-        history
-            .iter()
-            .map(|m| json!({ "role": m.role, "content": m.text })),
+        merge_adjacent(history)
+            .into_iter()
+            .map(|(role, text)| json!({ "role": role, "content": text })),
     );
 
     let mut body = json!({
@@ -684,9 +703,9 @@ fn anthropic_request(
     system_context: &str,
     stream: bool,
 ) -> RequestBuilder {
-    let messages: Vec<_> = history
-        .iter()
-        .map(|m| json!({ "role": m.role, "content": m.text }))
+    let messages: Vec<_> = merge_adjacent(history)
+        .into_iter()
+        .map(|(role, text)| json!({ "role": role, "content": text }))
         .collect();
 
     client
@@ -709,15 +728,11 @@ fn google_request(
     system_context: &str,
     stream: bool,
 ) -> RequestBuilder {
-    let contents: Vec<_> = history
-        .iter()
-        .map(|m| {
-            let role = if m.role == "assistant" {
-                "model"
-            } else {
-                "user"
-            };
-            json!({ "role": role, "parts": [{ "text": m.text }] })
+    let contents: Vec<_> = merge_adjacent(history)
+        .into_iter()
+        .map(|(role, text)| {
+            let role = if role == "assistant" { "model" } else { "user" };
+            json!({ "role": role, "parts": [{ "text": text }] })
         })
         .collect();
     let model = config
@@ -730,15 +745,16 @@ fn google_request(
         "generateContent"
     };
 
+    // Send the key in the header, not the query string: a URL with the key in it
+    // leaks into transport-error messages and any place the request URL is logged.
     client
         .post(format!(
-            "{}/models/{}:{}{}key={}",
+            "{}/models/{}:{}",
             clean_base(&config.base_url),
             model,
-            method,
-            if method.contains('?') { "&" } else { "?" },
-            config.api_key
+            method
         ))
+        .header("x-goog-api-key", &config.api_key)
         .json(&json!({
             "systemInstruction": { "parts": [{ "text": system_context }] },
             "contents": contents
@@ -770,24 +786,34 @@ async fn stream_response(
     print_tokens: bool,
 ) -> Result<(String, Usage)> {
     let mut chunks = response.bytes_stream();
-    let mut buf = String::new();
+    // Accumulate RAW bytes and only decode complete lines. Decoding each network
+    // chunk individually (the old behavior) mangled any multi-byte UTF-8
+    // character whose bytes straddled two chunks into replacement characters.
+    // A newline byte (0x0A) can never appear inside a multi-byte sequence, so
+    // splitting on it first and decoding whole lines is always safe.
+    let mut buf: Vec<u8> = Vec::new();
     let mut answer = String::new();
     let mut usage = Usage::default();
 
     while let Some(chunk) = chunks.next().await {
-        buf.push_str(&String::from_utf8_lossy(&chunk?));
-        while let Some(pos) = buf.find('\n') {
-            let line = buf[..pos].trim_end_matches('\r').to_string();
-            buf.drain(..=pos);
-            if handle_sse_line(provider, &line, &mut answer, &mut usage, print_tokens)? {
+        buf.extend_from_slice(&chunk?);
+        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
+            let decoded = String::from_utf8_lossy(&line_bytes);
+            let line = decoded.trim_end_matches('\n').trim_end_matches('\r');
+            if handle_sse_line(provider, line, &mut answer, &mut usage, print_tokens)? {
                 finish_usage(&mut usage, input_chars, answer.len());
                 return Ok((answer, usage));
             }
         }
     }
 
-    if !buf.trim().is_empty() {
-        handle_sse_line(provider, buf.trim(), &mut answer, &mut usage, print_tokens)?;
+    if !buf.is_empty() {
+        let decoded = String::from_utf8_lossy(&buf);
+        let line = decoded.trim();
+        if !line.is_empty() {
+            handle_sse_line(provider, line, &mut answer, &mut usage, print_tokens)?;
+        }
     }
     finish_usage(&mut usage, input_chars, answer.len());
     Ok((answer, usage))
@@ -912,4 +938,38 @@ pub fn print_usage_snapshot(usage: UsageSnapshot, totals: &mut Totals) {
 
 fn clean_base(url: &str) -> &str {
     url.trim_end_matches('/')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merges_consecutive_same_role_messages() {
+        let history = vec![
+            Msg::new("user", "question"),
+            Msg::new("assistant", "plan"),
+            Msg::new("user", "result one"),
+            Msg::new("user", "result two"),
+        ];
+        let merged = merge_adjacent(&history);
+        // The two consecutive user messages collapse into one, so the history
+        // stays strictly alternating (what Anthropic/Gemini require).
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[0].0, "user");
+        assert_eq!(merged[1].0, "assistant");
+        assert_eq!(merged[2].0, "user");
+        assert_eq!(merged[2].1, "result one\n\nresult two");
+    }
+
+    #[test]
+    fn merge_is_identity_when_already_alternating() {
+        let history = vec![
+            Msg::new("user", "a"),
+            Msg::new("assistant", "b"),
+            Msg::new("user", "c"),
+        ];
+        let merged = merge_adjacent(&history);
+        assert_eq!(merged.len(), 3);
+    }
 }

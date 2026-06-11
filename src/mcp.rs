@@ -14,6 +14,9 @@ use std::{
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const CLIENT_PROTOCOL_VERSION: &str = "2024-11-05";
+/// Cap a server-declared Content-Length so a buggy/hostile header can't trigger
+/// a multi-gigabyte allocation that aborts the whole CLI.
+const MAX_MCP_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 
 pub struct McpManager {
     workspace: PathBuf,
@@ -249,8 +252,18 @@ Configured servers:
 
     fn start(&mut self, name: &str) -> Result<String> {
         let name = clean_name(name)?;
-        if self.clients.contains_key(&name) {
-            return Ok(format!("MCP server '{name}' is already running"));
+        if let Some(client) = self.clients.get_mut(&name) {
+            // If the existing process has already exited, drop the dead client
+            // and start fresh — otherwise it stays wedged as "already running"
+            // forever and every tool call fails with no recovery path.
+            match client.child.try_wait() {
+                Ok(Some(_)) => {
+                    if let Some(mut dead) = self.clients.remove(&name) {
+                        let _ = dead.child.wait();
+                    }
+                }
+                _ => return Ok(format!("MCP server '{name}' is already running")),
+            }
         }
         let config = self
             .servers
@@ -312,7 +325,13 @@ Configured servers:
             protocol_version: CLIENT_PROTOCOL_VERSION.to_string(),
             tools: Vec::new(),
         };
-        client.initialize(&name)?;
+        if let Err(err) = client.initialize(&name) {
+            // Reap the child we just spawned so a failed handshake (e.g. a
+            // timeout) doesn't leak a live, detached MCP server process.
+            let _ = client.child.kill();
+            let _ = client.child.wait();
+            return Err(err);
+        }
         let tool_count = client.tools.len();
         self.clients.insert(name.clone(), client);
         Ok(format!(
@@ -326,6 +345,7 @@ Configured servers:
             return Ok(format!("MCP server '{name}' is not running"));
         };
         let _ = client.child.kill();
+        let _ = client.child.wait();
         let stderr = client.stderr_tail();
         let suffix = if stderr.is_empty() {
             String::new()
@@ -391,9 +411,9 @@ Configured servers:
     }
 
     fn ensure_started(&mut self, name: &str) -> Result<()> {
-        if !self.clients.contains_key(name) {
-            self.start(name)?;
-        }
+        // start() is idempotent: it no-ops when the server is alive and restarts
+        // it when the previous process has died.
+        self.start(name)?;
         Ok(())
     }
 
@@ -448,6 +468,7 @@ impl Drop for McpManager {
     fn drop(&mut self) {
         for client in self.clients.values_mut() {
             let _ = client.child.kill();
+            let _ = client.child.wait();
         }
     }
 }
@@ -618,14 +639,21 @@ fn read_message<R: Read>(reader: &mut BufReader<R>) -> Result<Option<Value>> {
             continue;
         }
         if trimmed.starts_with('{') {
-            let value = serde_json::from_str(trimmed)?;
-            return Ok(Some(value));
+            match serde_json::from_str(trimmed) {
+                Ok(value) => return Ok(Some(value)),
+                // A server diagnostic line that merely starts with '{' is not a
+                // JSON-RPC message — skip it instead of killing the connection.
+                Err(_) => continue,
+            }
         }
         if trimmed.to_ascii_lowercase().starts_with("content-length:") {
             let length = trimmed
                 .split_once(':')
                 .and_then(|(_, value)| value.trim().parse::<usize>().ok())
                 .context("invalid MCP Content-Length header")?;
+            if length > MAX_MCP_MESSAGE_BYTES {
+                bail!("MCP message too large: {length} bytes");
+            }
             loop {
                 let mut header = String::new();
                 let n = reader.read_line(&mut header)?;
@@ -645,9 +673,13 @@ fn read_message<R: Read>(reader: &mut BufReader<R>) -> Result<Option<Value>> {
 }
 
 fn write_message<W: Write>(writer: &mut W, value: &Value) -> Result<()> {
-    let body = serde_json::to_vec(value)?;
-    write!(writer, "Content-Length: {}\r\n\r\n", body.len())?;
-    writer.write_all(&body)?;
+    // The MCP stdio transport uses newline-delimited JSON, NOT LSP-style
+    // Content-Length framing. serde_json::to_string emits a single line with no
+    // embedded newlines, so one write + '\n' is a complete, spec-compliant
+    // message that real SDK servers (filesystem, etc.) actually accept.
+    let body = serde_json::to_string(value)?;
+    writer.write_all(body.as_bytes())?;
+    writer.write_all(b"\n")?;
     writer.flush()?;
     Ok(())
 }

@@ -101,7 +101,7 @@ impl ActivityLog {
     pub fn tool_started(&mut self, title: impl Into<String>, detail: impl Into<String>) {
         let entry = ActivityEntry {
             title: title.into(),
-            detail: detail.into(),
+            detail: sanitize(&detail.into()),
             result: None,
         };
         if let Ok(mut state) = self.state.lock() {
@@ -109,25 +109,35 @@ impl ActivityLog {
         }
 
         self.write_block(&format!(
-            "\n[working] {}\n  Press Down Arrow while a tool runs to expand details.",
-            entry.title
+            "\n{}  {}   {}",
+            crate::ui::cyan("◆"),
+            crate::ui::bold(&entry.title),
+            crate::ui::dim("(↓ expand)")
         ));
         if self.expanded() {
-            self.write_block(&format!("details:\n{}", entry.detail));
+            self.write_block(&format!("{}\n{}", crate::ui::dim("details:"), entry.detail));
         }
     }
 
     pub fn tool_finished(&mut self, brief: &str, result: &str) {
-        let result = truncate(result, 8_000);
+        // Sanitize untrusted tool output before printing so a crafted ANSI/escape
+        // sequence in a file, web page, or command result can't rewrite the
+        // operator's terminal.
+        let result = sanitize(&truncate(result, 8_000));
+        let brief = sanitize(brief);
         if let Ok(mut state) = self.state.lock() {
             if let Some(current) = &mut state.current {
                 current.result = Some(result.clone());
             }
         }
 
-        self.write_block(&format!("[result]\n{}", brief.trim()));
+        self.write_block(&format!(
+            "{}  {}",
+            crate::ui::green("✓"),
+            crate::ui::dim(brief.trim())
+        ));
         if self.expanded() {
-            self.write_block(&format!("result details:\n{}", result.trim()));
+            self.write_block(&format!("{}\n{}", crate::ui::dim("result:"), result.trim()));
         }
     }
 
@@ -183,4 +193,13 @@ fn truncate(text: &str, max: usize) -> String {
     } else {
         format!("{}...", text.chars().take(max).collect::<String>())
     }
+}
+
+/// Strip control characters (notably ESC, which starts ANSI sequences) from
+/// untrusted tool output, keeping newlines and tabs. Prevents terminal-escape
+/// injection from file contents, web pages, and command output.
+fn sanitize(text: &str) -> String {
+    text.chars()
+        .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
+        .collect()
 }

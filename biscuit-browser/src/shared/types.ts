@@ -276,6 +276,9 @@ export interface McpInfo {
   running: boolean
   url: string
   port: number
+  /** Bearer token required on every MCP POST. Surface in Settings so the user
+   *  can configure trusted local clients; it is what gates external access. */
+  token: string
 }
 
 // ── Chat ────────────────────────────────────────────────────────────────────

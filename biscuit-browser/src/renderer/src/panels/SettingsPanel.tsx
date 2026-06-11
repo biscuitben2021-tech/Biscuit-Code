@@ -35,6 +35,7 @@ export function SettingsPanel(): JSX.Element {
   const [saved, setSaved] = useState('')
   const [mcp, setMcp] = useState<McpInfo | null>(null)
   const [copied, setCopied] = useState(false)
+  const [tokenCopied, setTokenCopied] = useState(false)
 
   useEffect(() => {
     void window.biscuit.mcp.getInfo().then(setMcp)
@@ -172,10 +173,34 @@ export function SettingsPanel(): JSX.Element {
               {copied ? 'Copied' : 'Copy'}
             </button>
           </div>
+          <label>Auth token</label>
+          <div className="row">
+            <input
+              readOnly
+              type="password"
+              value={mcp.token}
+              onFocus={(e) => e.currentTarget.select()}
+            />
+            <button
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(mcp.token)
+                  setTokenCopied(true)
+                  window.setTimeout(() => setTokenCopied(false), 1500)
+                } catch {
+                  /* clipboard unavailable */
+                }
+              }}
+            >
+              {tokenCopied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
           <span className="muted">
-            Localhost only. In the Biscuits CLI, add it with <code>/mcp</code> (HTTP transport). Tools:
-            browser_get_agent_view, browser_open_url, browser_click, browser_type, browser_scroll,
-            browser_screenshot, browser_list_tabs, browser_new_tab, browser_status.
+            Localhost only. Every request must send <code>Authorization: Bearer &lt;token&gt;</code> with
+            <code>Content-Type: application/json</code> — this is what stops other apps or web pages from
+            driving your browser. Tools: browser_get_agent_view, browser_open_url, browser_click,
+            browser_type, browser_scroll, browser_screenshot, browser_list_tabs, browser_new_tab,
+            browser_status.
           </span>
         </div>
       ) : (

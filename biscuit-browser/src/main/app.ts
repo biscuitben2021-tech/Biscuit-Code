@@ -17,7 +17,7 @@ import { ActionLog } from './log'
 import { SettingsStore } from './settings/store'
 import { TabManager } from './tabs'
 import { AgentRuntime } from './agent/runtime'
-import { generateContract } from './agent/taskContract'
+import { generateContract, parseContract } from './agent/taskContract'
 import { evaluate } from './agent/actionGate'
 import { executeProposal } from './actions/execute'
 import { startMcpServer, type McpServerHandle } from './mcp/server'
@@ -56,6 +56,10 @@ export class App {
   // re-extracting (which would invalidate the @refs the agent just received).
   private mcp: McpServerHandle | null = null
   private lastMcpView: AgentView | null = null
+  /** IPC channels this App registered, so destroy() can remove them. Without
+   *  this, the macOS close-then-reactivate flow builds a second App whose
+   *  registerIpc() throws "second handler" and the reopened window is dead. */
+  private readonly ipcChannels: string[] = []
 
   constructor(
     private readonly win: BrowserWindow,
@@ -237,7 +241,15 @@ export class App {
   }
 
   private lockContract(edited?: TaskContract): void {
-    const contract = edited ?? this.contract.contract
+    // An edited contract comes straight from the renderer's raw-JSON editor and
+    // may be any shape (e.g. `{}` or `5`). Normalize it through parseContract so
+    // the locked contract always has the expected array fields — otherwise
+    // contractToTodo()/the Action Gate dereference undefined arrays and crash
+    // (white-screening the renderer and killing the task loop). Main is the
+    // authority for contract shape.
+    const contract = edited
+      ? parseContract(edited as unknown as Record<string, unknown>, this.contract.prompt)
+      : this.contract.contract
     if (!contract) return
     this.setContract({
       status: 'locked',
@@ -294,7 +306,12 @@ export class App {
 
   // ── IPC registration ───────────────────────────────────────────────────────
   private registerIpc(): void {
-    const h = ipcMain.handle.bind(ipcMain)
+    // Record every channel so destroy() can remove it (handlers are global and
+    // re-registering a still-registered channel throws).
+    const h: typeof ipcMain.handle = (channel, listener) => {
+      this.ipcChannels.push(channel)
+      ipcMain.handle(channel, listener)
+    }
 
     // Tabs
     h(IPC.TAB_CREATE, (_e, url?: string) => this.tabs.create(url))
@@ -381,7 +398,8 @@ export class App {
     h(IPC.MCP_GET_INFO, () => ({
       running: this.mcp !== null,
       url: this.mcp?.url ?? '',
-      port: this.mcp?.port ?? 0
+      port: this.mcp?.port ?? 0,
+      token: this.mcp?.token ?? ''
     }))
     h(IPC.RUNTIME_STOP, () => {
       this.runtime.stop()
@@ -524,5 +542,11 @@ export class App {
     this.runtime.stop()
     void this.mcp?.close()
     this.tabs.destroy()
+    // Remove our IPC handlers so a new App (macOS reactivate) can register them
+    // again without throwing.
+    for (const channel of this.ipcChannels) {
+      ipcMain.removeHandler(channel)
+    }
+    this.ipcChannels.length = 0
   }
 }

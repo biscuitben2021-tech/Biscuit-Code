@@ -1,4 +1,5 @@
 import http from 'node:http'
+import { randomBytes } from 'node:crypto'
 import type {
   ActionProposal,
   ActionResult,
@@ -38,7 +39,34 @@ export interface McpToolDeps {
 export interface McpServerHandle {
   url: string
   port: number
+  /** Per-session bearer token required on every POST. Share only with trusted
+   *  local clients (shown in Settings); it is what stops a malicious web page or
+   *  random local process from driving the browser. */
+  token: string
   close: () => Promise<void>
+}
+
+/** Localhost binding is not an authorization boundary on its own: any local
+ *  process, and any web page via a no-preflight cross-origin POST, can reach
+ *  127.0.0.1. So every POST must (a) carry the session bearer token, (b) not
+ *  come from a browser Origin, (c) target our exact localhost Host, and
+ *  (d) declare application/json. */
+export function authorizePost(
+  req: http.IncomingMessage,
+  token: string,
+  port: number
+): string | null {
+  if (req.headers.origin) return 'origin not allowed'
+  const host = req.headers.host
+  if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) {
+    return 'invalid host'
+  }
+  if (req.headers.authorization !== `Bearer ${token}`) return 'unauthorized'
+  const contentType = (req.headers['content-type'] ?? '').toString().toLowerCase()
+  if (!contentType.includes('application/json')) {
+    return 'content-type must be application/json'
+  }
+  return null
 }
 
 type Content = { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }
@@ -279,7 +307,8 @@ async function handle(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   tools: Tool[],
-  deps: McpToolDeps
+  deps: McpToolDeps,
+  auth: { token: string; port: number }
 ): Promise<void> {
   const send = (status: number, body?: object): void => {
     res.writeHead(status, { 'Content-Type': 'application/json' })
@@ -292,7 +321,7 @@ async function handle(
     return
   }
   if (req.method === 'GET') {
-    // Health/info probe (we don't open a server→client SSE stream).
+    // Health/info probe (no sensitive data, no token required).
     send(200, {
       name: SERVER_INFO.name,
       version: SERVER_INFO.version,
@@ -303,6 +332,12 @@ async function handle(
   }
   if (req.method !== 'POST') {
     send(405, rpcError(null, -32600, 'Method not allowed'))
+    return
+  }
+
+  const denied = authorizePost(req, auth.token, auth.port)
+  if (denied) {
+    send(401, rpcError(null, -32001, denied))
     return
   }
 
@@ -358,8 +393,11 @@ function listen(server: http.Server, startPort: number): Promise<number> {
 /** Start the MCP server on the first free port at/after `preferredPort`. */
 export async function startMcpServer(deps: McpToolDeps, preferredPort = 8765): Promise<McpServerHandle> {
   const tools = buildTools(deps)
+  // `auth.port` is filled in once we know the bound port; `handle` reads it at
+  // request time (always after listen resolves).
+  const auth = { token: randomBytes(24).toString('hex'), port: 0 }
   const server = http.createServer((req, res) => {
-    handle(req, res, tools, deps).catch(() => {
+    handle(req, res, tools, deps, auth).catch(() => {
       try {
         res.writeHead(500, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify(rpcError(null, -32603, 'Internal error')))
@@ -369,9 +407,11 @@ export async function startMcpServer(deps: McpToolDeps, preferredPort = 8765): P
     })
   })
   const port = await listen(server, preferredPort)
+  auth.port = port
   return {
     url: `http://127.0.0.1:${port}/mcp`,
     port,
+    token: auth.token,
     close: () => new Promise<void>((resolve) => server.close(() => resolve()))
   }
 }

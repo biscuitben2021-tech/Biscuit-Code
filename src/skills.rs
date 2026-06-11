@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashSet},
     fs,
-    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -398,9 +397,13 @@ impl SkillStore {
         let file = OverridesFile {
             overrides: self.overrides.clone(),
         };
-        let mut handle = fs::File::create(&self.state_path)?;
-        handle.write_all(serde_json::to_string_pretty(&file)?.as_bytes())?;
-        handle.write_all(b"\n")?;
+        // Atomic write so a crash can't truncate skills.json and silently drop
+        // every enable/disable override on the next launch.
+        let mut json = serde_json::to_string_pretty(&file)?;
+        json.push('\n');
+        let tmp = self.state_path.with_extension("json.tmp");
+        fs::write(&tmp, json.as_bytes())?;
+        fs::rename(&tmp, &self.state_path)?;
         Ok(())
     }
 }
