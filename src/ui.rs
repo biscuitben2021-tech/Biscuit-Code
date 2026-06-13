@@ -68,7 +68,7 @@ pub fn error(text: &str) -> String {
 /// widths break alignment); uses a clean left-aligned layout instead.
 pub fn banner(version: &str, workspace: &str, memory: &str, mode: &str, mode_sub: &str) {
     println!();
-    println!("  {}  {}", "🍪", bold(&cyan("Biscuit Code")));
+    println!("  🍪  {}", bold(&cyan("Biscuit Code")));
     println!(
         "  {}",
         grey(&format!(

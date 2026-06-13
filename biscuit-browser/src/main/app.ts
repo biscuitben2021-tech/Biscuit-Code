@@ -8,6 +8,7 @@ import type {
   ContractState,
   GateResult,
   PermissionMode,
+  RuntimeUpdate,
   Settings,
   SettingsUpdate,
   TaskContract
@@ -56,6 +57,13 @@ export class App {
   // re-extracting (which would invalidate the @refs the agent just received).
   private mcp: McpServerHandle | null = null
   private lastMcpView: AgentView | null = null
+  /** Last runtime status sent to the renderer, replayed if the renderer reloads
+   *  mid-task so it doesn't deadlock with Stop disabled. */
+  private lastRuntimeUpdate: RuntimeUpdate | null = null
+  /** Pending approval requests by id, replayed on reload (and used to know which
+   *  ones to re-surface). */
+  private readonly pendingApprovals = new Map<string, ApprovalRequest>()
+  private onDidFinishLoad: (() => void) | null = null
   /** IPC channels this App registered, so destroy() can remove them. Without
    *  this, the macOS close-then-reactivate flow builds a second App whose
    *  registerIpc() throws "second handler" and the reopened window is dead. */
@@ -83,6 +91,8 @@ export class App {
       emit: (update) => this.send(IPC.EVT_RUNTIME_UPDATE, update)
     })
     this.registerIpc()
+    this.onDidFinishLoad = () => this.resyncRenderer()
+    this.win.webContents.on('did-finish-load', this.onDidFinishLoad)
     this.tabs.create()
     void this.startMcp()
   }
@@ -159,7 +169,23 @@ export class App {
 
   // ── helpers ─────────────────────────────────────────────────────────────
   private send(channel: string, payload: unknown): void {
+    // Remember the latest runtime status so we can replay it after a reload.
+    if (channel === IPC.EVT_RUNTIME_UPDATE) {
+      this.lastRuntimeUpdate = payload as RuntimeUpdate
+    }
     if (!this.win.isDestroyed()) this.win.webContents.send(channel, payload)
+  }
+
+  /** Replay current task state to a freshly (re)loaded renderer so a Cmd+R mid
+   *  task re-syncs the runtime status and any pending approval instead of
+   *  leaving the UI stuck with Stop disabled. */
+  private resyncRenderer(): void {
+    if (this.lastRuntimeUpdate) {
+      this.send(IPC.EVT_RUNTIME_UPDATE, this.lastRuntimeUpdate)
+    }
+    for (const request of this.pendingApprovals.values()) {
+      this.send(IPC.EVT_APPROVAL_REQUESTED, request)
+    }
   }
 
   private llmConfig(): LlmConfig {
@@ -270,6 +296,7 @@ export class App {
     this.apSeq += 1
     const id = `ap-${this.apSeq}`
     const request: ApprovalRequest = { id, proposal, gate }
+    this.pendingApprovals.set(id, request)
     this.send(IPC.EVT_APPROVAL_REQUESTED, request)
     return new Promise<boolean>((resolve) => {
       this.approvals.set(id, resolve)
@@ -279,6 +306,7 @@ export class App {
         setTimeout(() => {
           if (this.approvals.has(id)) {
             this.approvals.delete(id)
+            this.pendingApprovals.delete(id)
             this.send(IPC.EVT_APPROVAL_RESOLVED, { id })
             resolve(false)
           }
@@ -291,6 +319,7 @@ export class App {
     const resolve = this.approvals.get(id)
     if (resolve) {
       this.approvals.delete(id)
+      this.pendingApprovals.delete(id)
       resolve(approved)
       this.send(IPC.EVT_APPROVAL_RESOLVED, { id })
     }
@@ -302,6 +331,7 @@ export class App {
       this.send(IPC.EVT_APPROVAL_RESOLVED, { id })
     }
     this.approvals.clear()
+    this.pendingApprovals.clear()
   }
 
   // ── IPC registration ───────────────────────────────────────────────────────
@@ -541,6 +571,10 @@ export class App {
   destroy(): void {
     this.runtime.stop()
     void this.mcp?.close()
+    if (this.onDidFinishLoad && !this.win.isDestroyed()) {
+      this.win.webContents.removeListener('did-finish-load', this.onDidFinishLoad)
+    }
+    this.onDidFinishLoad = null
     this.tabs.destroy()
     // Remove our IPC handlers so a new App (macOS reactivate) can register them
     // again without throwing.

@@ -264,6 +264,16 @@ export function extractorSource(generation: number, maxElements: number, maxText
     } catch (e) {
       return
     }
+    // Clear stale refs within THIS root's scope before re-tagging. querySelectorAll
+    // does not pierce shadow boundaries, so each shadow root is cleared by its own
+    // walkRoot call — this prevents a hidden/skipped element from a prior extraction
+    // from keeping a ref that collides with a fresh one (which would misclick).
+    try {
+      const stale = root.querySelectorAll('[data-biscuit-ref]')
+      for (let s = 0; s < stale.length; s++) stale[s].removeAttribute('data-biscuit-ref')
+    } catch (e) {
+      /* ignore */
+    }
     for (let i = 0; i < all.length; i++) {
       if (nodesWalked >= NODE_CAP) {
         truncated = true

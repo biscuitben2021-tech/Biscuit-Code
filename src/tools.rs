@@ -1,12 +1,12 @@
 use crate::{
-    browser::BrowserRuntime, computer_use::ComputerUseRuntime, goals::GoalStore, mcp::McpManager,
-    observations::ObservationSystem, skills::SkillStore,
+    browser::BrowserRuntime, computer_use::ComputerUseRuntime, goals::GoalStore, hooks::Hooks,
+    mcp::McpManager, observations::ObservationSystem, skills::SkillStore,
 };
 use anyhow::{bail, Context, Result};
 use glob::{glob, Pattern};
 use regex::Regex;
 use reqwest::{header::USER_AGENT, Client};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     fs,
@@ -28,6 +28,10 @@ pub struct ToolRuntime {
     browser: BrowserRuntime,
     monitors: HashMap<u64, Monitor>,
     next_monitor: u64,
+    /// Whether this runtime may spawn sub-agents via the Task tool. Set to false
+    /// inside a sub-agent so it can't recurse into more sub-agents.
+    allow_subagents: bool,
+    hooks: Hooks,
 }
 
 struct Monitor {
@@ -132,6 +136,7 @@ impl ToolRuntime {
         let mcp = McpManager::open(&workspace)?;
         let skills = SkillStore::open(&workspace)?;
         let browser = BrowserRuntime::new(&workspace);
+        let hooks = Hooks::open(&workspace);
         Ok(Self {
             workspace,
             goals,
@@ -142,7 +147,29 @@ impl ToolRuntime {
             browser,
             monitors: HashMap::new(),
             next_monitor: 1,
+            allow_subagents: true,
+            hooks,
         })
+    }
+
+    /// Configured lifecycle hooks for this workspace.
+    pub fn hooks(&self) -> &Hooks {
+        &self.hooks
+    }
+
+    /// Workspace root this runtime operates in.
+    pub fn workspace(&self) -> &Path {
+        &self.workspace
+    }
+
+    /// Whether the Task tool is offered/permitted in this runtime.
+    pub fn allow_subagents(&self) -> bool {
+        self.allow_subagents
+    }
+
+    /// Disable sub-agent spawning (used for the runtime inside a sub-agent).
+    pub fn set_allow_subagents(&mut self, allow: bool) {
+        self.allow_subagents = allow;
     }
 
     /// Returns the `<selected_skills>` system block for this user message, or
@@ -176,7 +203,7 @@ Available tools:
 - Observe: {{"target":"workspace|changes|file|terminal|monitor|web|screen","path":"relative/file","id":1,"url":"https://example.com"}}
 - Goal: manage the requirement todo list, e.g. {{"action":"set","title":"...","requirements":["..."]}}, {{"action":"update_requirement","id":"R1","status":"done","evidence":"..."}}, or {{"action":"mark_done","requirements_met":true,"verified":true,"no_errors":true,"checks":["cargo test"],"evidence":["..."]}}
 - Plan: record intended steps, tools, and files, e.g. {{"action":"set","summary":"...","steps":[{{"action":"Inspect code","tools":["Read"],"files":["src/main.rs"]}}]}}
-Use Read before editing files you have not inspected. Prefer Edit for precise changes and Write for new files.
+{subagent_tool}Use Read before editing files you have not inspected. Prefer Edit for precise changes and Write for new files.
 </tool_instructions>
 
 {observation_prompt}
@@ -185,10 +212,149 @@ Use Read before editing files you have not inspected. Prefer Edit for precise ch
 
 {goal_prompt}"#,
             workspace = self.workspace.display(),
+            subagent_tool = if self.allow_subagents {
+                "- Task: delegate a self-contained piece of work to a fresh sub-agent that has its own context and the same tools, then returns a short report. Use it to parallelize or isolate research/edits, e.g. {\"description\":\"audit auth module\",\"prompt\":\"Read src/auth/* and list every place a token is validated; do not change anything.\"}. The sub-agent cannot ask you questions, so give it everything it needs.\n"
+            } else {
+                ""
+            },
             observation_prompt = ObservationSystem::system_prompt(),
             mcp_prompt = self.mcp.system_prompt(),
             goal_prompt = self.goals.system_prompt()
         )
+    }
+
+    /// Structured tool definitions for native function calling. Mirrors the
+    /// tools advertised in `system_prompt`. Names are lowercase to match the
+    /// case-insensitive dispatch in `execute`.
+    pub fn tool_specs(&self) -> Vec<crate::llm::ToolSpecData> {
+        fn spec(name: &str, description: &str, parameters: Value) -> crate::llm::ToolSpecData {
+            crate::llm::ToolSpecData {
+                name: name.to_string(),
+                description: description.to_string(),
+                parameters,
+            }
+        }
+        let obj = |props: Value, required: Value| json!({"type": "object", "properties": props, "required": required, "additionalProperties": true});
+        let mut specs = vec![
+            spec(
+                "read",
+                "Read a workspace file.",
+                obj(
+                    json!({"path": {"type": "string"}, "max_bytes": {"type": "integer"}}),
+                    json!(["path"]),
+                ),
+            ),
+            spec(
+                "write",
+                "Create or overwrite a workspace file. Set overwrite=true to replace an existing file.",
+                obj(
+                    json!({"path": {"type": "string"}, "content": {"type": "string"}, "overwrite": {"type": "boolean"}}),
+                    json!(["path", "content"]),
+                ),
+            ),
+            spec(
+                "edit",
+                "Replace an exact substring in a file. Use replace_all for multiple matches.",
+                obj(
+                    json!({"path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}, "replace_all": {"type": "boolean"}}),
+                    json!(["path", "old", "new"]),
+                ),
+            ),
+            spec(
+                "bash",
+                "Run a shell command in the workspace.",
+                obj(
+                    json!({"command": {"type": "string"}, "timeout_secs": {"type": "integer"}}),
+                    json!(["command"]),
+                ),
+            ),
+            spec(
+                "monitor",
+                "Manage a long-running background process: action start|read|stop with command or id.",
+                obj(
+                    json!({"action": {"type": "string"}, "command": {"type": "string"}, "id": {"type": "integer"}}),
+                    json!(["action"]),
+                ),
+            ),
+            spec(
+                "glob",
+                "List workspace files matching a glob pattern.",
+                obj(json!({"pattern": {"type": "string"}}), json!(["pattern"])),
+            ),
+            spec(
+                "grep",
+                "Search file contents with a regex under an optional path/glob.",
+                obj(
+                    json!({"pattern": {"type": "string"}, "path": {"type": "string"}, "glob": {"type": "string"}, "max_matches": {"type": "integer"}}),
+                    json!(["pattern"]),
+                ),
+            ),
+            spec(
+                "websearch",
+                "Search the web and return result links.",
+                obj(
+                    json!({"query": {"type": "string"}, "limit": {"type": "integer"}}),
+                    json!(["query"]),
+                ),
+            ),
+            spec(
+                "webfetch",
+                "Fetch a URL and return its text content.",
+                obj(
+                    json!({"url": {"type": "string"}, "max_chars": {"type": "integer"}}),
+                    json!(["url"]),
+                ),
+            ),
+            spec(
+                "askuserquestion",
+                "Ask the user a question, optionally with choices.",
+                obj(
+                    json!({"question": {"type": "string"}, "choices": {"type": "array", "items": {"type": "string"}}}),
+                    json!(["question"]),
+                ),
+            ),
+            spec(
+                "observe",
+                "Inspect state: target workspace|changes|file|terminal|monitor|web|screen.",
+                obj(json!({"target": {"type": "string"}, "path": {"type": "string"}, "id": {"type": "integer"}, "url": {"type": "string"}}), json!(["target"])),
+            ),
+            spec(
+                "goal",
+                "Manage the requirement todo list (action set|add_requirement|update_requirement|mark_done|list|clear).",
+                obj(json!({"action": {"type": "string"}}), json!(["action"])),
+            ),
+            spec(
+                "plan",
+                "Record intended steps (action set|add_step|update_step|list|clear).",
+                obj(json!({"action": {"type": "string"}}), json!(["action"])),
+            ),
+            spec(
+                "computeruse",
+                "Inspect/control the local GUI (action open|screenshot|click|move|type|key with coordinates/text).",
+                obj(json!({"action": {"type": "string"}}), json!(["action"])),
+            ),
+            spec(
+                "mcp",
+                "Connect to and use MCP servers (action connect|tools|call|list).",
+                obj(json!({"action": {"type": "string"}}), json!(["action"])),
+            ),
+            spec(
+                "slashcommand",
+                "Run a local slash command, e.g. {\"command\":\"/mcp list\"}.",
+                obj(json!({"command": {"type": "string"}}), json!(["command"])),
+            ),
+        ];
+        if self.allow_subagents {
+            specs.push(spec(
+                "task",
+                "Delegate a self-contained job to a fresh sub-agent that returns a short report.",
+                obj(
+                    json!({"description": {"type": "string"}, "prompt": {"type": "string"}}),
+                    json!(["prompt"]),
+                ),
+            ));
+        }
+        specs
     }
 
     pub fn command_output(&mut self, input: &str) -> Result<Option<String>> {
@@ -208,6 +374,20 @@ Use Read before editing files you have not inspected. Prefer Edit for precise ch
             return Ok(Some(output));
         }
         self.goals.command_output(input)
+    }
+
+    /// Execute a read-only tool through `&self` so several can run concurrently.
+    /// Read-only tools make no workspace changes, so they skip the observation
+    /// snapshot wrapping that `execute` applies (there is nothing to diff).
+    pub async fn execute_readonly(&self, client: &Client, call: &ToolCall) -> Result<String> {
+        match call.tool.to_lowercase().as_str() {
+            "read" => self.read(&call.args),
+            "glob" => self.glob(&call.args),
+            "grep" => self.grep(&call.args),
+            "websearch" => self.web_search(client, &call.args).await,
+            "webfetch" => self.web_fetch(client, &call.args).await,
+            other => bail!("not a read-only tool: {other}"),
+        }
     }
 
     pub async fn execute(&mut self, client: &Client, call: ToolCall) -> Result<String> {
@@ -694,6 +874,15 @@ impl Drop for ToolRuntime {
 pub struct ParsedCalls {
     pub calls: Vec<ToolCall>,
     pub errors: Vec<String>,
+}
+
+/// Whether a tool only reads state (no workspace mutation, no process spawn), so
+/// several can be executed concurrently.
+pub fn is_readonly_tool(tool: &str) -> bool {
+    matches!(
+        tool.to_lowercase().as_str(),
+        "read" | "glob" | "grep" | "websearch" | "webfetch"
+    )
 }
 
 /// Parse tool calls out of a model plan. Never fails the whole turn on a single

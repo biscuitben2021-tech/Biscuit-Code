@@ -940,6 +940,255 @@ fn clean_base(url: &str) -> &str {
     url.trim_end_matches('/')
 }
 
+// ── Native tool calling (opt-in via BISCUITS_TOOL_MODE=native) ─────────────
+//
+// Hybrid design: the model emits structured tool calls (no fragile text-tag
+// parsing), but the conversation history we send stays text-only — callers
+// flatten each round's calls and results into ordinary text messages. Because
+// the requests we send never contain native tool-call/tool-result blocks, no
+// provider requires a matching native tool-result, and the existing text-based
+// history/persistence path is completely unaffected.
+
+/// A tool the model can call natively (provider-agnostic).
+#[derive(Clone)]
+pub struct ToolSpecData {
+    pub name: String,
+    pub description: String,
+    /// JSON Schema object describing the tool's arguments.
+    pub parameters: Value,
+}
+
+/// Whether to request native tool calls. Defaults to the verified text protocol;
+/// opt in with `BISCUITS_TOOL_MODE=native`.
+pub fn use_native_tools() -> bool {
+    matches!(
+        std::env::var("BISCUITS_TOOL_MODE").ok().as_deref(),
+        Some("native")
+    )
+}
+
+fn openai_tools(specs: &[ToolSpecData]) -> Value {
+    Value::Array(
+        specs
+            .iter()
+            .map(|s| {
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": s.name,
+                        "description": s.description,
+                        "parameters": s.parameters,
+                    }
+                })
+            })
+            .collect(),
+    )
+}
+
+fn anthropic_tools(specs: &[ToolSpecData]) -> Value {
+    Value::Array(
+        specs
+            .iter()
+            .map(|s| {
+                json!({
+                    "name": s.name,
+                    "description": s.description,
+                    "input_schema": s.parameters,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn google_tools(specs: &[ToolSpecData]) -> Value {
+    json!([{
+        "functionDeclarations": specs
+            .iter()
+            .map(|s| json!({
+                "name": s.name,
+                "description": s.description,
+                "parameters": s.parameters,
+            }))
+            .collect::<Vec<_>>()
+    }])
+}
+
+/// Parse an OpenAI chat-completion response into (assistant_text, calls).
+fn parse_openai_tools(event: &Value) -> (String, Vec<(String, Value)>) {
+    let message = event.pointer("/choices/0/message");
+    let text = message
+        .and_then(|m| m.get("content"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let mut calls = Vec::new();
+    if let Some(tool_calls) = message
+        .and_then(|m| m.get("tool_calls"))
+        .and_then(Value::as_array)
+    {
+        for tc in tool_calls {
+            let name = tc
+                .pointer("/function/name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if name.is_empty() {
+                continue;
+            }
+            // `arguments` is a JSON-encoded string.
+            let args = tc
+                .pointer("/function/arguments")
+                .and_then(Value::as_str)
+                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                .unwrap_or_else(|| json!({}));
+            calls.push((name.to_string(), args));
+        }
+    }
+    (text, calls)
+}
+
+/// Parse an Anthropic messages response into (assistant_text, calls).
+fn parse_anthropic_tools(event: &Value) -> (String, Vec<(String, Value)>) {
+    let mut text = String::new();
+    let mut calls = Vec::new();
+    if let Some(blocks) = event.get("content").and_then(Value::as_array) {
+        for block in blocks {
+            match block.get("type").and_then(Value::as_str) {
+                Some("text") => {
+                    if let Some(t) = block.get("text").and_then(Value::as_str) {
+                        text.push_str(t);
+                    }
+                }
+                Some("tool_use") => {
+                    let name = block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if name.is_empty() {
+                        continue;
+                    }
+                    let args = block.get("input").cloned().unwrap_or_else(|| json!({}));
+                    calls.push((name.to_string(), args));
+                }
+                _ => {}
+            }
+        }
+    }
+    (text, calls)
+}
+
+/// Parse a Google generateContent response into (assistant_text, calls).
+fn parse_google_tools(event: &Value) -> (String, Vec<(String, Value)>) {
+    let mut text = String::new();
+    let mut calls = Vec::new();
+    if let Some(parts) = event
+        .pointer("/candidates/0/content/parts")
+        .and_then(Value::as_array)
+    {
+        for part in parts {
+            if let Some(t) = part.get("text").and_then(Value::as_str) {
+                text.push_str(t);
+            }
+            if let Some(fc) = part.get("functionCall") {
+                let name = fc.get("name").and_then(Value::as_str).unwrap_or_default();
+                if name.is_empty() {
+                    continue;
+                }
+                let args = fc.get("args").cloned().unwrap_or_else(|| json!({}));
+                calls.push((name.to_string(), args));
+            }
+        }
+    }
+    (text, calls)
+}
+
+/// Non-streaming planning request that advertises native tools and returns the
+/// assistant text plus any structured tool calls. History stays text-only.
+pub async fn complete_with_tools(
+    client: &Client,
+    config: &Config,
+    system: &str,
+    history: &[Msg],
+    specs: &[ToolSpecData],
+) -> Result<(String, Vec<(String, Value)>)> {
+    let system = format!("{}\n\n{}", config.base_system, system);
+    let req = match config.provider {
+        Provider::OpenAI | Provider::OpenAICompat | Provider::LMStudio => {
+            let mut messages = vec![json!({ "role": "system", "content": system })];
+            messages.extend(
+                merge_adjacent(history)
+                    .into_iter()
+                    .map(|(role, text)| json!({ "role": role, "content": text })),
+            );
+            let body = json!({
+                "model": config.model,
+                "messages": messages,
+                "tools": openai_tools(specs),
+                "tool_choice": "auto",
+                "stream": false,
+            });
+            authed(
+                client
+                    .post(format!("{}/chat/completions", clean_base(&config.base_url)))
+                    .json(&body),
+                &config.api_key,
+            )
+        }
+        Provider::Anthropic => {
+            let messages: Vec<_> = merge_adjacent(history)
+                .into_iter()
+                .map(|(role, text)| json!({ "role": role, "content": text }))
+                .collect();
+            let body = json!({
+                "model": config.model,
+                "system": system,
+                "messages": messages,
+                "max_tokens": 4096,
+                "tools": anthropic_tools(specs),
+                "stream": false,
+            });
+            client
+                .post(format!("{}/messages", clean_base(&config.base_url)))
+                .header("x-api-key", &config.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .json(&body)
+        }
+        Provider::Google => {
+            let contents: Vec<_> = merge_adjacent(history)
+                .into_iter()
+                .map(|(role, text)| {
+                    let role = if role == "assistant" { "model" } else { "user" };
+                    json!({ "role": role, "parts": [{ "text": text }] })
+                })
+                .collect();
+            let model = config
+                .model
+                .strip_prefix("models/")
+                .unwrap_or(&config.model);
+            let body = json!({
+                "systemInstruction": { "parts": [{ "text": system }] },
+                "contents": contents,
+                "tools": google_tools(specs),
+            });
+            client
+                .post(format!(
+                    "{}/models/{}:generateContent",
+                    clean_base(&config.base_url),
+                    model
+                ))
+                .header("x-goog-api-key", &config.api_key)
+                .json(&body)
+        }
+    };
+    let event: Value = send(req).await?.json().await?;
+    Ok(match config.provider {
+        Provider::OpenAI | Provider::OpenAICompat | Provider::LMStudio => {
+            parse_openai_tools(&event)
+        }
+        Provider::Anthropic => parse_anthropic_tools(&event),
+        Provider::Google => parse_google_tools(&event),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -971,5 +1220,99 @@ mod tests {
         ];
         let merged = merge_adjacent(&history);
         assert_eq!(merged.len(), 3);
+    }
+
+    fn spec() -> ToolSpecData {
+        ToolSpecData {
+            name: "read".into(),
+            description: "Read a file".into(),
+            parameters: json!({"type":"object","properties":{"path":{"type":"string"}}}),
+        }
+    }
+
+    #[test]
+    fn openai_tools_shape() {
+        let tools = openai_tools(&[spec()]);
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["function"]["name"], "read");
+        assert!(tools[0]["function"]["parameters"]["properties"]["path"].is_object());
+    }
+
+    #[test]
+    fn anthropic_tools_shape() {
+        let tools = anthropic_tools(&[spec()]);
+        assert_eq!(tools[0]["name"], "read");
+        assert!(tools[0]["input_schema"]["properties"]["path"].is_object());
+    }
+
+    #[test]
+    fn google_tools_shape() {
+        let tools = google_tools(&[spec()]);
+        assert_eq!(tools[0]["functionDeclarations"][0]["name"], "read");
+    }
+
+    #[test]
+    fn parse_openai_extracts_text_and_calls() {
+        let event = json!({
+            "choices": [{
+                "message": {
+                    "content": "let me read it",
+                    "tool_calls": [{
+                        "function": { "name": "read", "arguments": "{\"path\":\"src/main.rs\"}" }
+                    }]
+                }
+            }]
+        });
+        let (text, calls) = parse_openai_tools(&event);
+        assert_eq!(text, "let me read it");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "read");
+        assert_eq!(calls[0].1["path"], "src/main.rs");
+    }
+
+    #[test]
+    fn parse_openai_handles_no_calls_and_bad_args() {
+        let plain = json!({"choices":[{"message":{"content":"hi"}}]});
+        let (text, calls) = parse_openai_tools(&plain);
+        assert_eq!(text, "hi");
+        assert!(calls.is_empty());
+        // Malformed arguments string degrades to empty object, not a panic.
+        let bad = json!({"choices":[{"message":{"tool_calls":[{"function":{"name":"bash","arguments":"{not json"}}]}}]});
+        let (_, calls) = parse_openai_tools(&bad);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "bash");
+        assert!(calls[0].1.is_object());
+    }
+
+    #[test]
+    fn parse_anthropic_extracts_text_and_tool_use() {
+        let event = json!({
+            "content": [
+                { "type": "text", "text": "reading" },
+                { "type": "tool_use", "name": "read", "input": { "path": "a.txt" } }
+            ]
+        });
+        let (text, calls) = parse_anthropic_tools(&event);
+        assert_eq!(text, "reading");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "read");
+        assert_eq!(calls[0].1["path"], "a.txt");
+    }
+
+    #[test]
+    fn parse_google_extracts_text_and_function_call() {
+        let event = json!({
+            "candidates": [{
+                "content": { "parts": [
+                    { "text": "ok" },
+                    { "functionCall": { "name": "grep", "args": { "pattern": "todo" } } }
+                ] }
+            }]
+        });
+        let (text, calls) = parse_google_tools(&event);
+        assert_eq!(text, "ok");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "grep");
+        assert_eq!(calls[0].1["pattern"], "todo");
     }
 }

@@ -4,7 +4,9 @@ mod browser;
 mod computer_use;
 mod evals;
 mod goals;
+mod hooks;
 mod llm;
+mod markdown;
 mod mcp;
 mod memory;
 mod observations;
@@ -154,6 +156,7 @@ pub async fn run() -> Result<()> {
             prompt,
             &extra_context,
             true,
+            0,
         )
         .await;
         turn_active.store(false, std::sync::atomic::Ordering::Relaxed);

@@ -106,6 +106,42 @@ These runtime files are ignored by default except `BISCUITS.md`, which you may c
 /skills disable <name> stop a skill from being injected
 ```
 
+## Sub-agents
+
+Biscuits can delegate a self-contained piece of work to a fresh **sub-agent**
+that has its own context and the same tools, then returns a short report. The
+model invokes it through the `Task` tool — useful for isolating research or
+parallelizing independent investigation. Sub-agents inherit the current
+permission mode, share the interrupt (Ctrl-C halts the whole tree), and cannot
+spawn further sub-agents.
+
+## Hooks
+
+Drop a `.biscuits/hooks.json` to run your own shell commands around tool calls:
+
+```json
+{
+  "pre_tool":  ["./scripts/guard.sh"],
+  "post_tool": ["echo \"$BISCUITS_TOOL ran\" >> .biscuits/tool.log"],
+  "stop":      ["say done"]
+}
+```
+
+A `pre_tool` hook that exits non-zero **blocks** the tool call (its output is fed
+back to the model), so you can enforce policy the model can't bypass. Hooks
+receive context via `BISCUITS_HOOK_EVENT`, `BISCUITS_TOOL`, `BISCUITS_TOOL_ARGS`
+(JSON), and — for `post_tool` — `BISCUITS_TOOL_RESULT`.
+
+## Environment toggles
+
+```text
+BISCUITS_TOOL_MODE=native   use each provider's native function-calling API
+                            instead of the default text-tag protocol
+BISCUITS_RENDER=raw         stream the answer as raw text instead of the
+                            default Markdown rendering
+NO_COLOR=1                  disable ANSI colors
+```
+
 ## Skills
 
 Skills are portable Markdown instruction packs that teach Biscuits a reusable

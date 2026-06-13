@@ -260,7 +260,7 @@ fn classify_bash(cmd: &str) -> Action {
     // Admin / dangerous — scan every chained segment, not just the first token,
     // so `echo hi && sudo reboot` or `x; rm -rf ~` can't hide behind a benign
     // prefix.
-    let segments = cmd.split(|c: char| matches!(c, ';' | '&' | '|' | '\n'));
+    let segments = cmd.split([';', '&', '|', '\n']);
     for seg in segments {
         let seg = seg.trim();
         if seg == "sudo"

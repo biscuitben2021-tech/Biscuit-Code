@@ -286,6 +286,7 @@ async fn run_case(
             &prompt,
             "<eval_mode>Run this as an isolated evaluation case.</eval_mode>",
             false,
+            0,
         ),
     )
     .await
