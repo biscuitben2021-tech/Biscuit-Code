@@ -14,6 +14,10 @@ path = "src/bin/biscuits.rs"
 name = "biscuit"
 path = "src/bin/biscuit.rs"
 
+[[bin]]
+name = "biscuit-gui-mcp"
+path = "src/bin/biscuit-gui-mcp.rs"
+
 [dependencies]
 anyhow = "1"
 crossterm = "0.29"
@@ -22,7 +26,7 @@ futures-util = "0.3"
 glob = "0.3"
 libc = "0.2"
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "blocking"] }
 rpassword = "7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

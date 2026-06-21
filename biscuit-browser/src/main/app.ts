@@ -1,4 +1,6 @@
-import { BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow, ipcMain } from 'electron'
+import { renameSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import type {
   ActionProposal,
   ActionResult,
@@ -118,8 +120,53 @@ export class App {
         log: (message) => this.log.add({ type: 'system', message })
       })
       this.log.add({ type: 'system', message: `MCP server listening at ${this.mcp.url}` })
+      this.writeMcpEndpointFile(this.mcp)
     } catch (err) {
       this.log.add({ type: 'system', message: `MCP server failed to start: ${(err as Error).message}` })
+    }
+  }
+
+  /** Path of the discovery file the Biscuit Code CLI reads to find + authenticate
+   *  to this app's MCP server. */
+  private mcpEndpointFile(): string {
+    return join(app.getPath('userData'), 'mcp.json')
+  }
+
+  /** Publish the MCP endpoint + bearer token to userData/mcp.json so the CLI's
+   *  `/install biscuit-browser` flow can discover and authenticate. Written
+   *  atomically (tmp + rename), owner-only (0o600). Best-effort; never throws;
+   *  the token value itself is never logged. */
+  private writeMcpEndpointFile(handle: McpServerHandle): void {
+    const file = this.mcpEndpointFile()
+    const tmp = `${file}.tmp`
+    try {
+      const payload = JSON.stringify(
+        { url: handle.url, token: handle.token, port: handle.port, pid: process.pid },
+        null,
+        2
+      )
+      writeFileSync(tmp, payload, { encoding: 'utf8', mode: 0o600 })
+      renameSync(tmp, file)
+      this.log.add({ type: 'system', message: `MCP endpoint file written to ${file}` })
+    } catch (err) {
+      this.log.add({
+        type: 'system',
+        message: `failed to write MCP endpoint file: ${(err as Error).message}`
+      })
+      try {
+        rmSync(tmp, { force: true })
+      } catch {
+        /* best-effort cleanup */
+      }
+    }
+  }
+
+  /** Remove the discovery file so a stale token doesn't linger after quit. */
+  private removeMcpEndpointFile(): void {
+    try {
+      rmSync(this.mcpEndpointFile(), { force: true })
+    } catch {
+      /* best-effort */
     }
   }
 
@@ -571,6 +618,7 @@ export class App {
   destroy(): void {
     this.runtime.stop()
     void this.mcp?.close()
+    this.removeMcpEndpointFile()
     if (this.onDidFinishLoad && !this.win.isDestroyed()) {
       this.win.webContents.removeListener('did-finish-load', this.onDidFinishLoad)
     }

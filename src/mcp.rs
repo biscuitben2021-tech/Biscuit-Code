@@ -17,12 +17,18 @@ const CLIENT_PROTOCOL_VERSION: &str = "2024-11-05";
 /// Cap a server-declared Content-Length so a buggy/hostile header can't trigger
 /// a multi-gigabyte allocation that aborts the whole CLI.
 const MAX_MCP_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+/// How long `/install biscuit-browser` waits for the browser to publish its
+/// MCP discovery file before giving up and telling the user to launch it.
+const BROWSER_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct McpManager {
     workspace: PathBuf,
     config_path: PathBuf,
+    plugins_path: PathBuf,
     servers: HashMap<String, McpServerConfig>,
     clients: HashMap<String, McpClient>,
+    /// Names of plugins the user explicitly installed (persisted across runs).
+    installed_plugins: Vec<String>,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -30,11 +36,28 @@ struct McpConfigFile {
     servers: Vec<McpServerConfig>,
 }
 
+#[derive(Default, Deserialize, Serialize)]
+struct PluginsFile {
+    installed: Vec<String>,
+}
+
+fn default_transport() -> String {
+    "stdio".to_string()
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 struct McpServerConfig {
     name: String,
     command: String,
     auto_start: bool,
+    /// "stdio" (default, child process) or "http" (JSON-RPC over HTTP). Defaults
+    /// keep older {name,command,auto_start} configs deserializing unchanged.
+    #[serde(default = "default_transport")]
+    transport: String,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    token: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -44,12 +67,24 @@ struct McpToolInfo {
     input_schema: Value,
 }
 
+/// The wire transport a connected client speaks. A client is EITHER a child
+/// process (stdio) OR a remote HTTP endpoint, never both.
+enum Transport {
+    Stdio {
+        child: Child,
+        stdin: ChildStdin,
+        rx: Receiver<Value>,
+        stderr_rx: Receiver<String>,
+        stderr: Vec<String>,
+    },
+    Http {
+        url: String,
+        token: Option<String>,
+    },
+}
+
 struct McpClient {
-    child: Child,
-    stdin: ChildStdin,
-    rx: Receiver<Value>,
-    stderr_rx: Receiver<String>,
-    stderr: Vec<String>,
+    transport: Transport,
     next_id: u64,
     protocol_version: String,
     tools: Vec<McpToolInfo>,
@@ -60,6 +95,7 @@ impl McpManager {
         let root = workspace.join(".biscuits");
         fs::create_dir_all(&root)?;
         let config_path = root.join("mcp_servers.json");
+        let plugins_path = root.join("plugins.json");
         let config = if config_path.exists() {
             let text = fs::read_to_string(&config_path)?;
             serde_json::from_str::<McpConfigFile>(&text).unwrap_or_default()
@@ -74,11 +110,22 @@ impl McpManager {
             }
         }
 
+        let installed_plugins = if plugins_path.exists() {
+            let text = fs::read_to_string(&plugins_path)?;
+            serde_json::from_str::<PluginsFile>(&text)
+                .map(|p| p.installed)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
         let manager = Self {
             workspace: workspace.to_path_buf(),
             config_path,
+            plugins_path,
             servers,
             clients: HashMap::new(),
+            installed_plugins,
         };
         manager.save()?;
         Ok(manager)
@@ -101,6 +148,10 @@ Current MCP servers:
     }
 
     pub fn command_output(&mut self, input: &str) -> Result<Option<String>> {
+        if let Some(output) = self.plugin_command_output(input)? {
+            return Ok(Some(output));
+        }
+
         let Some(rest) = input.strip_prefix("/mcp") else {
             return Ok(None);
         };
@@ -156,6 +207,43 @@ Current MCP servers:
             _ => bail!("unknown /mcp action: {action}"),
         };
         Ok(Some(output))
+    }
+
+    /// Handle the plugin install surface (`/plugins`, `/install`, `/uninstall`,
+    /// `/plugin start|stop`). Uses the same prefix-with-word-boundary guard as
+    /// the `/mcp` handler so `/installer` etc. don't false-match. Returns
+    /// `Ok(None)` when the input is not a plugin command.
+    fn plugin_command_output(&mut self, input: &str) -> Result<Option<String>> {
+        if let Some(rest) = command_rest(input, "/plugins") {
+            if !rest.trim().is_empty() {
+                bail!("usage: /plugins");
+            }
+            return Ok(Some(self.render_plugins()));
+        }
+        if let Some(rest) = command_rest(input, "/install") {
+            let name = required_word(rest, "usage: /install <name>")?;
+            return Ok(Some(self.install_plugin(name)?));
+        }
+        if let Some(rest) = command_rest(input, "/uninstall") {
+            let name = required_word(rest, "usage: /uninstall <name>")?;
+            return Ok(Some(self.uninstall_plugin(name)?));
+        }
+        if let Some(rest) = command_rest(input, "/plugin") {
+            let (action, rest) = next_word(rest.trim());
+            return match action {
+                "start" => {
+                    let name = required_word(rest, "usage: /plugin start <name>")?;
+                    Ok(Some(self.start(name)?))
+                }
+                "stop" => {
+                    let name = required_word(rest, "usage: /plugin stop <name>")?;
+                    Ok(Some(self.stop(name)?))
+                }
+                "" => Ok(Some(self.render_plugins())),
+                other => bail!("unknown /plugin action: {other}"),
+            };
+        }
+        Ok(None)
     }
 
     pub fn execute(&mut self, args: &Value) -> Result<String> {
@@ -220,6 +308,13 @@ Current MCP servers:
   /mcp tools [name]            list MCP tools
   /mcp call <server> <tool> {{}} call an MCP tool with JSON arguments
 
+Plugin commands:
+  /plugins                     list built-in + installed plugins
+  /install <name>              install and start a plugin
+  /uninstall <name>            stop and remove a plugin
+  /plugin start <name>         start an installed plugin
+  /plugin stop <name>          stop a running plugin
+
 Configured servers:
 {}"#,
             self.render_servers(false)
@@ -239,6 +334,9 @@ Configured servers:
                 name: name.clone(),
                 command: command.to_string(),
                 auto_start,
+                transport: default_transport(),
+                url: None,
+                token: None,
             },
         );
         self.save()?;
@@ -250,20 +348,34 @@ Configured servers:
         }
     }
 
+    /// Register (or replace) an HTTP MCP server config without starting it.
+    fn register_http(&mut self, name: &str, url: &str, token: Option<String>) -> Result<()> {
+        let name = clean_name(name)?;
+        self.servers.insert(
+            name.clone(),
+            McpServerConfig {
+                name,
+                command: url.to_string(),
+                auto_start: true,
+                transport: "http".to_string(),
+                url: Some(url.to_string()),
+                token,
+            },
+        );
+        self.save()
+    }
+
     fn start(&mut self, name: &str) -> Result<String> {
         let name = clean_name(name)?;
         if let Some(client) = self.clients.get_mut(&name) {
-            // If the existing process has already exited, drop the dead client
-            // and start fresh — otherwise it stays wedged as "already running"
-            // forever and every tool call fails with no recovery path.
-            match client.child.try_wait() {
-                Ok(Some(_)) => {
-                    if let Some(mut dead) = self.clients.remove(&name) {
-                        let _ = dead.child.wait();
-                    }
-                }
-                _ => return Ok(format!("MCP server '{name}' is already running")),
+            // If an existing stdio process has already exited, drop the dead
+            // client and start fresh — otherwise it stays wedged as "already
+            // running" forever and every tool call fails with no recovery path.
+            // HTTP clients are stateless and always considered alive while held.
+            if client.is_alive() {
+                return Ok(format!("MCP server '{name}' is already running"));
             }
+            self.clients.remove(&name);
         }
         let config = self
             .servers
@@ -271,6 +383,13 @@ Configured servers:
             .with_context(|| format!("MCP server not configured: {name}"))?
             .clone();
 
+        if config.transport == "http" {
+            return self.start_http(&name, &config);
+        }
+        self.start_stdio(&name, &config)
+    }
+
+    fn start_stdio(&mut self, name: &str, config: &McpServerConfig) -> Result<String> {
         let mut child = crate::shell::command(&config.command)
             .current_dir(&self.workspace)
             .stdin(Stdio::piped())
@@ -316,24 +435,54 @@ Configured servers:
         });
 
         let mut client = McpClient {
-            child,
-            stdin,
-            rx,
-            stderr_rx,
-            stderr: Vec::new(),
+            transport: Transport::Stdio {
+                child,
+                stdin,
+                rx,
+                stderr_rx,
+                stderr: Vec::new(),
+            },
             next_id: 1,
             protocol_version: CLIENT_PROTOCOL_VERSION.to_string(),
             tools: Vec::new(),
         };
-        if let Err(err) = client.initialize(&name) {
+        if let Err(err) = client.initialize(name) {
             // Reap the child we just spawned so a failed handshake (e.g. a
             // timeout) doesn't leak a live, detached MCP server process.
-            let _ = client.child.kill();
-            let _ = client.child.wait();
+            client.kill();
             return Err(err);
         }
         let tool_count = client.tools.len();
-        self.clients.insert(name.clone(), client);
+        self.clients.insert(name.to_string(), client);
+        Ok(format!(
+            "MCP server '{name}' started ({tool_count} tool(s) discovered)"
+        ))
+    }
+
+    fn start_http(&mut self, name: &str, config: &McpServerConfig) -> Result<String> {
+        let url = config
+            .url
+            .clone()
+            .or_else(|| {
+                if config.command.starts_with("http") {
+                    Some(config.command.clone())
+                } else {
+                    None
+                }
+            })
+            .with_context(|| format!("HTTP MCP server '{name}' has no url"))?;
+        let mut client = McpClient {
+            transport: Transport::Http {
+                url,
+                token: config.token.clone(),
+            },
+            next_id: 1,
+            protocol_version: CLIENT_PROTOCOL_VERSION.to_string(),
+            tools: Vec::new(),
+        };
+        client.initialize(name)?;
+        let tool_count = client.tools.len();
+        self.clients.insert(name.to_string(), client);
         Ok(format!(
             "MCP server '{name}' started ({tool_count} tool(s) discovered)"
         ))
@@ -344,8 +493,7 @@ Configured servers:
         let Some(mut client) = self.clients.remove(&name) else {
             return Ok(format!("MCP server '{name}' is not running"));
         };
-        let _ = client.child.kill();
-        let _ = client.child.wait();
+        client.kill();
         let stderr = client.stderr_tail();
         let suffix = if stderr.is_empty() {
             String::new()
@@ -434,7 +582,12 @@ Configured servers:
             } else {
                 "stopped"
             };
-            let mut line = format!("- {name}: {status}; command: {}", config.command);
+            let detail = if config.transport == "http" {
+                format!("http: {}", config.url.as_deref().unwrap_or(&config.command))
+            } else {
+                format!("command: {}", config.command)
+            };
+            let mut line = format!("- {name}: {status}; {detail}");
             if include_tools {
                 if let Some(client) = self.clients.get(&name) {
                     if !client.tools.is_empty() {
@@ -462,13 +615,156 @@ Configured servers:
         file.write_all(b"\n")?;
         Ok(())
     }
+
+    // ── Plugin install system ──────────────────────────────────────────────
+
+    fn render_plugins(&self) -> String {
+        let mut out = vec!["Plugins:".to_string()];
+        for plugin in plugin_registry() {
+            let installed = self.installed_plugins.iter().any(|n| n == plugin.name);
+            let running = self.clients.contains_key(plugin.name);
+            let state = if running {
+                "running"
+            } else if installed {
+                "installed (stopped)"
+            } else {
+                "available"
+            };
+            out.push(format!(
+                "- {} [{}]: {} ({})",
+                plugin.name, plugin.transport, plugin.description, state
+            ));
+        }
+        // Surface any installed plugin names that are not built-ins (forward
+        // compatibility if the registry ever changes between versions).
+        for name in &self.installed_plugins {
+            if plugin_registry().iter().all(|p| p.name != name) {
+                let running = self.clients.contains_key(name);
+                let state = if running {
+                    "running"
+                } else {
+                    "installed (stopped)"
+                };
+                out.push(format!("- {name} (unknown plugin) ({state})"));
+            }
+        }
+        out.join("\n")
+    }
+
+    fn install_plugin(&mut self, name: &str) -> Result<String> {
+        let plugin = plugin_registry()
+            .into_iter()
+            .find(|p| p.name == name)
+            .with_context(|| {
+                format!("unknown plugin '{name}'; run /plugins to list available plugins")
+            })?;
+
+        let started = match plugin.kind {
+            PluginKind::BiscuitBrowser => self.install_biscuit_browser(&plugin)?,
+            PluginKind::BiscuitGui => self.install_biscuit_gui(&plugin)?,
+        };
+
+        if !self.installed_plugins.iter().any(|n| n == plugin.name) {
+            self.installed_plugins.push(plugin.name.to_string());
+            self.save_plugins()?;
+        }
+        Ok(format!("Plugin '{}' installed.\n{started}", plugin.name))
+    }
+
+    fn install_biscuit_gui(&mut self, plugin: &Plugin) -> Result<String> {
+        let command = resolve_biscuit_gui_command(&self.workspace);
+        // Register as a normal stdio server and start it through the existing
+        // spawn path so its tools are immediately usable.
+        self.connect(plugin.name, &command, true)
+    }
+
+    fn install_biscuit_browser(&mut self, plugin: &Plugin) -> Result<String> {
+        let browser_dir = self.workspace.join("biscuit-browser");
+        if !browser_dir.is_dir() {
+            bail!(
+                "biscuit-browser/ not found in workspace; clone or place the browser app there first"
+            );
+        }
+
+        // 1. npm install if node_modules is missing.
+        if !browser_dir.join("node_modules").exists() {
+            let output = crate::shell::command("npm install")
+                .current_dir(&browser_dir)
+                .output()
+                .context("failed to run `npm install` in biscuit-browser/")?;
+            if !output.status.success() {
+                bail!(
+                    "`npm install` in biscuit-browser/ failed:\n{}",
+                    truncate(&String::from_utf8_lossy(&output.stderr), 2000)
+                );
+            }
+        }
+
+        // 2. Launch `npm run dev` detached, in its own process group, with null
+        // stdio so it survives independently and doesn't pipe into the CLI.
+        let mut cmd = crate::shell::command("npm run dev");
+        cmd.current_dir(&browser_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        crate::shell::spawn_in_own_group(&mut cmd);
+        cmd.spawn()
+            .context("failed to launch `npm run dev` for biscuit-browser")?;
+
+        // 3. Poll the discovery file the browser writes on MCP start.
+        let discovery = browser_discovery_path()?;
+        let endpoint = poll_browser_discovery(&discovery, BROWSER_DISCOVERY_TIMEOUT)?;
+
+        // 4. Register + start the HTTP MCP server.
+        self.register_http(plugin.name, &endpoint.url, endpoint.token)?;
+        self.start(plugin.name)
+    }
+
+    fn uninstall_plugin(&mut self, name: &str) -> Result<String> {
+        // Accept any registered/installed name (clean for safety).
+        let name = clean_name(name)?;
+        let stopped = self.stop(&name)?;
+        let was_configured = self.servers.remove(&name).is_some();
+        if was_configured {
+            self.save()?;
+        }
+        let was_installed =
+            if let Some(pos) = self.installed_plugins.iter().position(|n| n == &name) {
+                self.installed_plugins.remove(pos);
+                self.save_plugins()?;
+                true
+            } else {
+                false
+            };
+        if !was_installed && !was_configured {
+            bail!("plugin '{name}' is not installed");
+        }
+        Ok(format!("{stopped}\nPlugin '{name}' uninstalled"))
+    }
+
+    fn save_plugins(&self) -> Result<()> {
+        let mut installed = self.installed_plugins.clone();
+        installed.sort();
+        installed.dedup();
+        let payload = PluginsFile { installed };
+        let text = serde_json::to_string_pretty(&payload)?;
+        // Atomic write: temp file in the same dir + rename.
+        let tmp = self.plugins_path.with_extension("json.tmp");
+        {
+            let mut file = fs::File::create(&tmp)?;
+            file.write_all(text.as_bytes())?;
+            file.write_all(b"\n")?;
+            file.flush()?;
+        }
+        fs::rename(&tmp, &self.plugins_path)?;
+        Ok(())
+    }
 }
 
 impl Drop for McpManager {
     fn drop(&mut self) {
         for client in self.clients.values_mut() {
-            let _ = client.child.kill();
-            let _ = client.child.wait();
+            client.kill();
         }
     }
 }
@@ -525,7 +821,7 @@ impl McpClient {
         if self.tools.is_empty() {
             self.drain_stderr();
         }
-        if self.child.try_wait()?.is_some() {
+        if !self.is_alive() {
             bail!("MCP server '{server}' exited during tools/list");
         }
         Ok(())
@@ -555,20 +851,39 @@ impl McpClient {
     fn request(&mut self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id;
         self.next_id += 1;
-        write_message(
-            &mut self.stdin,
-            &json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "method": method,
-                "params": params
-            }),
-        )?;
+        match &mut self.transport {
+            Transport::Stdio { .. } => self.request_stdio(id, method, params),
+            Transport::Http { url, token } => {
+                let url = url.clone();
+                let token = token.clone();
+                request_http(&url, token.as_deref(), id, method, params)
+            }
+        }
+    }
+
+    fn request_stdio(&mut self, id: u64, method: &str, params: Value) -> Result<Value> {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params
+        });
+        let Transport::Stdio {
+            child,
+            stdin,
+            rx,
+            stderr,
+            stderr_rx,
+        } = &mut self.transport
+        else {
+            unreachable!("request_stdio called on non-stdio transport");
+        };
+        write_message(stdin, &body)?;
 
         let start = Instant::now();
         while start.elapsed() < REQUEST_TIMEOUT {
-            self.drain_stderr();
-            match self.rx.recv_timeout(Duration::from_millis(100)) {
+            drain_stderr_into(stderr_rx, stderr);
+            match rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(message) => {
                     if let Some(err) = message.get("biscuits_mcp_error") {
                         bail!("MCP protocol read error: {err}");
@@ -582,48 +897,324 @@ impl McpClient {
                     return Ok(message.get("result").cloned().unwrap_or(Value::Null));
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if let Some(status) = self.child.try_wait()? {
-                        let stderr = self.stderr_tail();
-                        bail!("MCP server exited while handling '{method}': {status}\n{stderr}");
+                    if let Some(status) = child.try_wait()? {
+                        let tail = tail_lines(stderr);
+                        bail!("MCP server exited while handling '{method}': {status}\n{tail}");
                     }
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    let stderr = self.stderr_tail();
-                    bail!("MCP server output closed while handling '{method}'\n{stderr}");
+                    let tail = tail_lines(stderr);
+                    bail!("MCP server output closed while handling '{method}'\n{tail}");
                 }
             }
         }
 
-        let stderr = self.stderr_tail();
-        bail!("MCP request '{method}' timed out after 20s\n{stderr}");
+        let tail = tail_lines(stderr);
+        bail!("MCP request '{method}' timed out after 20s\n{tail}");
     }
 
     fn notify(&mut self, method: &str, params: Value) -> Result<()> {
-        write_message(
-            &mut self.stdin,
-            &json!({
-                "jsonrpc": "2.0",
-                "method": method,
-                "params": params
-            }),
-        )
+        match &mut self.transport {
+            Transport::Stdio { stdin, .. } => write_message(
+                stdin,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "method": method,
+                    "params": params
+                }),
+            ),
+            Transport::Http { url, token } => {
+                let url = url.clone();
+                let token = token.clone();
+                // Fire a notification (no id) and ignore the response/body.
+                let _ = notify_http(&url, token.as_deref(), method, params);
+                Ok(())
+            }
+        }
+    }
+
+    /// Whether the underlying transport is still usable. Stdio is alive while
+    /// the child process has not exited; HTTP is stateless and is treated as
+    /// alive for as long as the client object is held.
+    fn is_alive(&mut self) -> bool {
+        match &mut self.transport {
+            Transport::Stdio { child, .. } => !matches!(child.try_wait(), Ok(Some(_))),
+            Transport::Http { .. } => true,
+        }
+    }
+
+    /// Stop the transport: kill+reap a child process; HTTP is a no-op.
+    fn kill(&mut self) {
+        if let Transport::Stdio { child, .. } = &mut self.transport {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 
     fn drain_stderr(&mut self) {
-        while let Ok(line) = self.stderr_rx.try_recv() {
-            self.stderr.push(line);
-        }
-        let keep = 80;
-        if self.stderr.len() > keep {
-            let drain = self.stderr.len() - keep;
-            self.stderr.drain(0..drain);
+        if let Transport::Stdio {
+            stderr_rx, stderr, ..
+        } = &mut self.transport
+        {
+            drain_stderr_into(stderr_rx, stderr);
         }
     }
 
     fn stderr_tail(&mut self) -> String {
-        self.drain_stderr();
-        let start = self.stderr.len().saturating_sub(20);
-        self.stderr[start..].join("\n")
+        match &mut self.transport {
+            Transport::Stdio {
+                stderr_rx, stderr, ..
+            } => {
+                drain_stderr_into(stderr_rx, stderr);
+                tail_lines(stderr)
+            }
+            Transport::Http { .. } => String::new(),
+        }
+    }
+}
+
+/// Pull all pending stderr lines into the rolling buffer, keeping at most the
+/// last 80 lines so a chatty server can't grow this unbounded.
+fn drain_stderr_into(rx: &Receiver<String>, buffer: &mut Vec<String>) {
+    while let Ok(line) = rx.try_recv() {
+        buffer.push(line);
+    }
+    let keep = 80;
+    if buffer.len() > keep {
+        let drain = buffer.len() - keep;
+        buffer.drain(0..drain);
+    }
+}
+
+fn tail_lines(buffer: &[String]) -> String {
+    let start = buffer.len().saturating_sub(20);
+    buffer[start..].join("\n")
+}
+
+// ── Pure HTTP JSON-RPC helpers (unit-testable, no network) ─────────────────
+
+/// Build a JSON-RPC 2.0 request body. A `None` id produces a notification
+/// (no `id` field), which the server answers with no response.
+fn build_http_rpc(id: Option<u64>, method: &str, params: Value) -> Value {
+    match id {
+        Some(id) => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params
+        }),
+        None => json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params
+        }),
+    }
+}
+
+/// Extract the JSON-RPC `result` from a parsed response, or surface its
+/// `error`. Mirrors the stdio path's result/error handling exactly.
+fn extract_rpc_result(response: &Value, method: &str) -> Result<Value> {
+    if let Some(error) = response.get("error") {
+        bail!("MCP request '{method}' failed: {error}");
+    }
+    Ok(response.get("result").cloned().unwrap_or(Value::Null))
+}
+
+/// Perform a blocking HTTP JSON-RPC request on a freshly spawned std::thread.
+///
+/// reqwest::blocking PANICS when constructed inside a tokio runtime, and
+/// McpManager runs inside one. Moving the ENTIRE blocking exchange onto a plain
+/// std::thread keeps it off the async reactor; the result comes back over an
+/// mpsc channel which we wait on with the same ~20s request timeout.
+fn request_http(
+    url: &str,
+    token: Option<&str>,
+    id: u64,
+    method: &str,
+    params: Value,
+) -> Result<Value> {
+    let body = build_http_rpc(Some(id), method, params);
+    let method = method.to_string();
+    let (tx, rx) = mpsc::channel::<std::result::Result<Value, String>>();
+    spawn_http_post(url, token, body, tx);
+
+    match rx.recv_timeout(REQUEST_TIMEOUT) {
+        Ok(Ok(value)) => extract_rpc_result(&value, &method),
+        Ok(Err(err)) => bail!("MCP HTTP request '{method}' failed: {err}"),
+        Err(_) => bail!("MCP HTTP request '{method}' timed out after 20s"),
+    }
+}
+
+/// Fire-and-forget HTTP notification (no id). The response is ignored.
+fn notify_http(url: &str, token: Option<&str>, method: &str, params: Value) -> Result<()> {
+    let body = build_http_rpc(None, method, params);
+    let (tx, _rx) = mpsc::channel::<std::result::Result<Value, String>>();
+    spawn_http_post(url, token, body, tx);
+    // Do not wait for or inspect the response: notifications have no reply.
+    Ok(())
+}
+
+/// Spawn the blocking POST on its own thread. Headers: Authorization (only when
+/// a token is present) and Content-Type: application/json. NO Origin header —
+/// the browser MCP server rejects any request carrying one.
+fn spawn_http_post(
+    url: &str,
+    token: Option<&str>,
+    body: Value,
+    tx: mpsc::Sender<std::result::Result<Value, String>>,
+) {
+    let url = url.to_string();
+    let token = token.map(str::to_string);
+    thread::spawn(move || {
+        let result = (|| -> std::result::Result<Value, String> {
+            let client = reqwest::blocking::Client::builder()
+                .timeout(REQUEST_TIMEOUT)
+                .build()
+                .map_err(|e| e.to_string())?;
+            let mut req = client.post(&url).header("Content-Type", "application/json");
+            if let Some(token) = &token {
+                req = req.header("Authorization", format!("Bearer {token}"));
+            }
+            let response = req.json(&body).send().map_err(|e| e.to_string())?;
+            let status = response.status();
+            let text = response.text().map_err(|e| e.to_string())?;
+            if text.trim().is_empty() {
+                // 202 Accepted (e.g. a notification) carries no body.
+                return Ok(Value::Null);
+            }
+            let value: Value = serde_json::from_str(&text).map_err(|e| {
+                format!(
+                    "invalid JSON response (HTTP {status}): {e}: {}",
+                    truncate(&text, 400)
+                )
+            })?;
+            Ok(value)
+        })();
+        let _ = tx.send(result);
+    });
+}
+
+// ── Browser discovery file ─────────────────────────────────────────────────
+
+struct BrowserEndpoint {
+    url: String,
+    token: Option<String>,
+}
+
+/// The discovery file Biscuit Browser writes on MCP start:
+/// `<config_dir>/biscuit-browser/mcp.json` (Electron `userData`).
+fn browser_discovery_path() -> Result<PathBuf> {
+    let dir = dirs::config_dir().context("could not resolve config directory")?;
+    Ok(dir.join("biscuit-browser").join("mcp.json"))
+}
+
+/// Poll the discovery file until it appears and parses, or the timeout elapses.
+fn poll_browser_discovery(path: &Path, timeout: Duration) -> Result<BrowserEndpoint> {
+    let start = Instant::now();
+    loop {
+        if let Ok(text) = fs::read_to_string(path) {
+            if let Some(endpoint) = parse_browser_discovery(&text) {
+                return Ok(endpoint);
+            }
+        }
+        if start.elapsed() >= timeout {
+            bail!(
+                "Biscuit Browser did not publish its MCP endpoint at {} within {}s. \
+                 Launch Biscuit Browser manually (npm run dev in biscuit-browser/), then run /install biscuit-browser again.",
+                path.display(),
+                timeout.as_secs()
+            );
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// Parse {url, token, ...} out of the discovery file. Returns None until both a
+/// usable url is present (token is optional from our side).
+fn parse_browser_discovery(text: &str) -> Option<BrowserEndpoint> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    let url = value.get("url").and_then(Value::as_str)?.to_string();
+    if url.is_empty() {
+        return None;
+    }
+    let token = value
+        .get("token")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Some(BrowserEndpoint { url, token })
+}
+
+// ── Plugin registry ────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy)]
+enum PluginKind {
+    BiscuitBrowser,
+    BiscuitGui,
+}
+
+struct Plugin {
+    name: &'static str,
+    transport: &'static str,
+    description: &'static str,
+    kind: PluginKind,
+}
+
+fn plugin_registry() -> Vec<Plugin> {
+    vec![
+        Plugin {
+            name: "biscuit-browser",
+            transport: "http",
+            description:
+                "Drive Biscuit Browser (open/click/type/read pages) over its local MCP server.",
+            kind: PluginKind::BiscuitBrowser,
+        },
+        Plugin {
+            name: "biscuit-gui",
+            transport: "stdio",
+            description: "Local GUI automation tools via the biscuit-gui-mcp stdio server.",
+            kind: PluginKind::BiscuitGui,
+        },
+    ]
+}
+
+/// Resolve the biscuit-gui stdio command: prefer one on PATH, then a release
+/// build, then a debug build under the workspace.
+fn resolve_biscuit_gui_command(workspace: &Path) -> String {
+    if which_on_path("biscuit-gui-mcp") {
+        return "biscuit-gui-mcp".to_string();
+    }
+    let release = workspace.join("target/release/biscuit-gui-mcp");
+    if release.exists() {
+        return release.to_string_lossy().into_owned();
+    }
+    let debug = workspace.join("target/debug/biscuit-gui-mcp");
+    if debug.exists() {
+        return debug.to_string_lossy().into_owned();
+    }
+    // Fall back to the debug path string so the error (if any) is actionable.
+    debug.to_string_lossy().into_owned()
+}
+
+/// Whether an executable of the given name is reachable on PATH.
+fn which_on_path(name: &str) -> bool {
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&paths).any(|dir| {
+        let candidate = dir.join(name);
+        candidate.is_file()
+    })
+}
+
+/// Match a slash command by exact prefix with a word boundary, returning the
+/// trailing text. `/install foo` matches `/install` (rest = " foo"); `/installer`
+/// does not. Mirrors the guard the `/mcp` handler uses.
+fn command_rest<'a>(input: &'a str, command: &str) -> Option<&'a str> {
+    let rest = input.strip_prefix(command)?;
+    if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+        Some(rest)
+    } else {
+        None
     }
 }
 
@@ -792,5 +1383,142 @@ fn one_line(text: &str, max: usize) -> String {
         compact
     } else {
         format!("{}...", compact.chars().take(max).collect::<String>())
+    }
+}
+
+fn truncate(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_string()
+    } else {
+        format!("{}...", text.chars().take(max).collect::<String>())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_config_deserializes_with_stdio_default() {
+        // Old configs predate the transport/url/token fields.
+        let json = r#"{"name":"fs","command":"npx server","auto_start":true}"#;
+        let config: McpServerConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.name, "fs");
+        assert_eq!(config.command, "npx server");
+        assert!(config.auto_start);
+        assert_eq!(config.transport, "stdio");
+        assert!(config.url.is_none());
+        assert!(config.token.is_none());
+    }
+
+    #[test]
+    fn old_config_file_deserializes() {
+        let json = r#"{"servers":[{"name":"fs","command":"npx server","auto_start":false}]}"#;
+        let file: McpConfigFile = serde_json::from_str(json).unwrap();
+        assert_eq!(file.servers.len(), 1);
+        assert_eq!(file.servers[0].transport, "stdio");
+    }
+
+    #[test]
+    fn http_config_round_trips() {
+        let config = McpServerConfig {
+            name: "browser".to_string(),
+            command: "http://127.0.0.1:8765/mcp".to_string(),
+            auto_start: true,
+            transport: "http".to_string(),
+            url: Some("http://127.0.0.1:8765/mcp".to_string()),
+            token: Some("abc".to_string()),
+        };
+        let text = serde_json::to_string(&config).unwrap();
+        let back: McpServerConfig = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.transport, "http");
+        assert_eq!(back.url.as_deref(), Some("http://127.0.0.1:8765/mcp"));
+        assert_eq!(back.token.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn build_http_rpc_request_has_id() {
+        let body = build_http_rpc(Some(7), "tools/list", json!({"a": 1}));
+        assert_eq!(body["jsonrpc"], "2.0");
+        assert_eq!(body["id"], 7);
+        assert_eq!(body["method"], "tools/list");
+        assert_eq!(body["params"]["a"], 1);
+    }
+
+    #[test]
+    fn build_http_rpc_notification_has_no_id() {
+        let body = build_http_rpc(None, "notifications/initialized", json!({}));
+        assert_eq!(body["jsonrpc"], "2.0");
+        assert!(body.get("id").is_none());
+        assert_eq!(body["method"], "notifications/initialized");
+    }
+
+    #[test]
+    fn extract_rpc_result_returns_result() {
+        let response = json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": []}});
+        let result = extract_rpc_result(&response, "tools/list").unwrap();
+        assert!(result.get("tools").is_some());
+    }
+
+    #[test]
+    fn extract_rpc_result_returns_null_when_missing() {
+        let response = json!({"jsonrpc": "2.0", "id": 1});
+        let result = extract_rpc_result(&response, "ping").unwrap();
+        assert_eq!(result, Value::Null);
+    }
+
+    #[test]
+    fn extract_rpc_result_surfaces_error() {
+        let response =
+            json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32601, "message": "nope"}});
+        let err = extract_rpc_result(&response, "tools/list").unwrap_err();
+        assert!(err.to_string().contains("failed"));
+        assert!(err.to_string().contains("nope"));
+    }
+
+    #[test]
+    fn plugin_registry_contains_builtins() {
+        let names: Vec<&str> = plugin_registry().iter().map(|p| p.name).collect();
+        assert!(names.contains(&"biscuit-browser"));
+        assert!(names.contains(&"biscuit-gui"));
+    }
+
+    #[test]
+    fn biscuit_gui_resolves_to_target_path_when_not_on_path() {
+        // With no matching binary on PATH or under a temp workspace, we fall
+        // back to the debug target path (a deterministic, actionable default).
+        let workspace = std::env::temp_dir().join("biscuits-gui-resolve-test-unlikely");
+        let cmd = resolve_biscuit_gui_command(&workspace);
+        // Either a PATH hit ("biscuit-gui-mcp") on a dev machine that has it, or
+        // the debug fallback path under the workspace.
+        assert!(
+            cmd == "biscuit-gui-mcp"
+                || cmd.ends_with("target/debug/biscuit-gui-mcp")
+                || cmd.ends_with("target/release/biscuit-gui-mcp")
+        );
+    }
+
+    #[test]
+    fn parse_browser_discovery_reads_url_and_token() {
+        let text = r#"{"url":"http://127.0.0.1:8765/mcp","token":"deadbeef","port":8765}"#;
+        let endpoint = parse_browser_discovery(text).unwrap();
+        assert_eq!(endpoint.url, "http://127.0.0.1:8765/mcp");
+        assert_eq!(endpoint.token.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn parse_browser_discovery_rejects_empty() {
+        assert!(parse_browser_discovery("{}").is_none());
+        assert!(parse_browser_discovery(r#"{"url":""}"#).is_none());
+        assert!(parse_browser_discovery("not json").is_none());
+    }
+
+    #[test]
+    fn command_rest_respects_word_boundary() {
+        assert_eq!(command_rest("/install foo", "/install"), Some(" foo"));
+        assert_eq!(command_rest("/install", "/install"), Some(""));
+        assert_eq!(command_rest("/installer", "/install"), None);
+        assert_eq!(command_rest("/plugins", "/plugin"), None);
+        assert_eq!(command_rest("/plugin start x", "/plugin"), Some(" start x"));
     }
 }

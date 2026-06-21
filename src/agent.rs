@@ -323,6 +323,44 @@ pub async fn run_slash_command(
         memory.clear_context(history)?;
         return Ok(Some("context cleared; previous chat is saved".into()));
     }
+    // /test: generate / view / update the test contract. Routed here because it
+    // needs client + config (for generation) which the tool router doesn't have.
+    if let Some(rest) = input.strip_prefix("/test") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            let workspace = tools.workspace().to_path_buf();
+            let rest = rest.trim();
+            let (cmd, args) = match rest.split_once(char::is_whitespace) {
+                Some((c, a)) => (c, a.trim()),
+                None => (rest, ""),
+            };
+            let output = match cmd {
+                "" | "show" => crate::contract::load(&workspace)
+                    .map(|c| c.render())
+                    .unwrap_or_else(|| "no test contract yet — run /test plan".into()),
+                "plan" => {
+                    let contract = crate::contract::generate(client, config, &workspace).await?;
+                    contract.save(&workspace)?;
+                    format!("test contract generated:\n{}", contract.render())
+                }
+                "pass" | "fail" => {
+                    let (id, note) = match args.split_once(char::is_whitespace) {
+                        Some((i, n)) => (i.trim(), n.trim()),
+                        None => (args, ""),
+                    };
+                    if id.is_empty() {
+                        format!("usage: /test {cmd} <id> [note]")
+                    } else {
+                        crate::contract::record_result(&workspace, id, cmd == "pass", note)?;
+                        crate::contract::load(&workspace)
+                            .map(|c| c.render())
+                            .unwrap_or_default()
+                    }
+                }
+                _ => "usage: /test plan | show | pass <id> [note] | fail <id> [note]".into(),
+            };
+            return Ok(Some(output));
+        }
+    }
     if let Some(output) = tools.command_output(input)? {
         return Ok(Some(output));
     }
