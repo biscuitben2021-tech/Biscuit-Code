@@ -15,6 +15,17 @@ use std::{
 };
 
 const DIMS: usize = 64;
+// Minimum query/document TF-IDF cosine for a memory to be eligible for
+// injection. The cosine is bounded in [0, 1]; a memory that shares no weighted
+// query terms scores 0 and is excluded. 0.10 admits genuine partial overlap
+// (e.g. one shared meaningful term out of a few) while rejecting off-topic
+// memories that only coincide on stopwords (stopwords are dropped) or not at
+// all. It is independent of recency/access, so those boosts can never let an
+// off-topic memory through.
+const RELEVANCE_GATE: f32 = 0.10;
+// Additive bump for a memory whose attached entity is named verbatim in the
+// query. Kept small so it orders relevant candidates without dwarfing cosine.
+const ENTITY_BONUS: f32 = 0.15;
 const MAX_LOG_LINES: usize = 2_000;
 const MAX_LOG_SNAPSHOT_FILES: usize = 2_000;
 const MAX_LOG_TEXT_BYTES: u64 = 200_000;
@@ -147,6 +158,16 @@ pub struct RetrievedMemory {
     score: f32,
 }
 
+// Internal ranking record: `relevance` is the pure query/document TF-IDF cosine
+// used for the gate and the reported score; `rank` adds capped tie-breakers used
+// only to order candidates that already passed the gate.
+struct Scored {
+    index: usize,
+    relevance: f32,
+    rank: f32,
+    priority: f32,
+}
+
 #[derive(Clone, Default)]
 pub struct ChangeSnapshot {
     files: HashMap<String, SnapshotFile>,
@@ -171,7 +192,7 @@ struct ChangeDiff {
 
 impl MemoryStore {
     pub fn open(workspace: PathBuf) -> Result<Self> {
-        Self::open_at(workspace.clone(), workspace.join(".biscuits"))
+        Self::open_at(workspace.clone(), workspace.join("biscuits"))
     }
 
     pub fn open_isolated(workspace: PathBuf, root: PathBuf) -> Result<Self> {
@@ -1031,44 +1052,88 @@ impl MemoryStore {
         if self.settings.privacy == PrivacyMode::Incognito {
             return Vec::new();
         }
-        let q = embed(query);
+
+        // Candidate indices, filtered for privacy/activity, so the inverse
+        // document frequency is computed over exactly the corpus we can serve.
+        let candidates: Vec<usize> = self
+            .graph
+            .memories
+            .iter()
+            .enumerate()
+            .filter(|(_, memory)| {
+                if !memory.active || memory.sensitivity == "restricted" {
+                    return false;
+                }
+                if self.settings.privacy != PrivacyMode::Normal && memory.sensitivity == "sensitive"
+                {
+                    return false;
+                }
+                true
+            })
+            .map(|(index, _)| index)
+            .collect();
+
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+
+        // TF-IDF model is derived at query time from the stored `text` of the
+        // candidate memories only. Nothing here is persisted, so the on-disk
+        // format is untouched and old graphs load unchanged.
+        let idf =
+            inverse_document_frequency(candidates.iter().map(|&i| &self.graph.memories[i].text));
+        let query_vec = tfidf_vector(query, &idf);
+
         let mentioned = self.mentioned_entities(query);
         let t = now();
-        let mut scored = Vec::new();
+        let mut scored: Vec<Scored> = Vec::new();
 
-        for (index, memory) in self.graph.memories.iter().enumerate() {
-            if !memory.active || memory.sensitivity == "restricted" {
-                continue;
-            }
-            if self.settings.privacy != PrivacyMode::Normal && memory.sensitivity == "sensitive" {
-                continue;
-            }
-            let sim = cosine(&q, &memory.embedding);
-            let graph_boost = if memory
+        for &index in &candidates {
+            let memory = &self.graph.memories[index];
+
+            // Relevance is computed ONLY from query/document overlap. Recency
+            // and access count are deliberately excluded so they can never push
+            // an off-topic memory across the gate (no positive feedback loop).
+            let relevance = cosine_map(&query_vec, &tfidf_vector(&memory.text, &idf));
+
+            // Entity overlap is a genuine topical signal (the query literally
+            // names an entity attached to this memory), so it is allowed to open
+            // the gate on its own — unlike recency/frequency.
+            let entity_match = memory
                 .entities
                 .iter()
-                .any(|e| mentioned.iter().any(|m| m.eq_ignore_ascii_case(e)))
-            {
-                0.25
-            } else {
-                0.0
-            };
+                .any(|e| mentioned.iter().any(|m| m.eq_ignore_ascii_case(e)));
+
+            if relevance < RELEVANCE_GATE && !entity_match {
+                continue;
+            }
+
+            // Tie-breakers only: applied AFTER the gate, and only ever additive
+            // among already-relevant candidates. Their combined weight is capped
+            // well below the gate so they cannot resurrect an excluded memory.
             let age_days = (t.saturating_sub(memory.updated_at) as f32 / 86_400.0).max(0.0);
             let recency = 1.0 / (1.0 + age_days / 30.0);
-            let frequency = (memory.access_count as f32 + 1.0).ln() / 8.0;
+            // Saturating access tie-breaker: bounded in [0, 0.02] so a memory
+            // retrieved a thousand times gains no runaway ranking advantage.
+            let access = (memory.access_count as f32 / (memory.access_count as f32 + 20.0)) * 0.02;
             let priority = kind_priority(&memory.kind);
-            let score = sim * 0.55 + graph_boost + recency * 0.1 + frequency + priority * 0.15;
-            if score > 0.14 || graph_boost > 0.0 {
-                scored.push(RetrievedMemory { index, score });
-            }
+            let entity_bonus = if entity_match { ENTITY_BONUS } else { 0.0 };
+
+            let rank = relevance + entity_bonus + recency * 0.03 + access + priority * 0.005;
+
+            scored.push(Scored {
+                index,
+                relevance,
+                rank,
+                priority,
+            });
         }
 
         scored.sort_by(|a, b| {
-            let ak = kind_priority(&self.graph.memories[a.index].kind);
-            let bk = kind_priority(&self.graph.memories[b.index].kind);
-            bk.partial_cmp(&ak)
+            b.priority
+                .partial_cmp(&a.priority)
                 .unwrap_or(Ordering::Equal)
-                .then_with(|| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal))
+                .then_with(|| b.rank.partial_cmp(&a.rank).unwrap_or(Ordering::Equal))
         });
 
         let mut budget = self.settings.token_budget;
@@ -1077,7 +1142,12 @@ impl MemoryStore {
             let cost = estimate_tokens(self.graph.memories[item.index].text.len());
             if cost <= budget {
                 budget -= cost;
-                selected.push(item);
+                // Surface the gate-relevance as the reported score so the
+                // injected context reflects topical fit, not recency inflation.
+                selected.push(RetrievedMemory {
+                    index: item.index,
+                    score: item.relevance,
+                });
             }
             if selected.len() >= 12 {
                 break;
@@ -1263,7 +1333,7 @@ fn read_to_string(path: &Path) -> Result<String> {
 }
 
 fn biscuit_dir(workspace: &Path, root: &Path) -> PathBuf {
-    let default_root = workspace.join(".biscuits");
+    let default_root = workspace.join("biscuits");
     if root == default_root {
         workspace.join("biscuit")
     } else {
@@ -1280,7 +1350,7 @@ fn ensure_biscuit_files(
     fs::create_dir_all(biscuit_dir)?;
     if !handoff_path.exists() {
         let legacy = workspace.join("handoff.md");
-        if root == workspace.join(".biscuits") && legacy.exists() {
+        if root == workspace.join("biscuits") && legacy.exists() {
             fs::copy(legacy, handoff_path)?;
         } else {
             fs::write(handoff_path, DEFAULT_HANDOFF)?;
@@ -1442,7 +1512,7 @@ fn skip_log_snapshot_path(root: &Path, path: &Path) -> bool {
         return true;
     }
     let rel = rel_path(root, path);
-    rel.starts_with(".biscuits/") || rel == ".biscuits" || is_biscuit_log_path(&rel)
+    rel.starts_with("biscuits/") || rel == "biscuits" || is_biscuit_log_path(&rel)
 }
 
 fn is_biscuit_log_path(rel: &str) -> bool {
@@ -1644,7 +1714,7 @@ fn rel_path(root: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         // Normalize to forward slashes so the biscuit-log skip checks (which
-        // compare against "biscuit/" and ".biscuits/") work on Windows, where
+        // compare against "biscuit/" and "biscuits/") work on Windows, where
         // strip_prefix yields backslash separators.
         .replace('\\', "/")
 }
@@ -1883,6 +1953,150 @@ fn embed(text: &str) -> Vec<f32> {
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+}
+
+// Short, common words carry no topical signal; dropping them keeps the gate
+// from being satisfied by incidental "the/and/is" overlap and keeps IDF honest.
+fn is_stopword(token: &str) -> bool {
+    matches!(
+        token,
+        "the"
+            | "a"
+            | "an"
+            | "and"
+            | "or"
+            | "but"
+            | "is"
+            | "are"
+            | "was"
+            | "were"
+            | "be"
+            | "been"
+            | "to"
+            | "of"
+            | "in"
+            | "on"
+            | "at"
+            | "for"
+            | "with"
+            | "as"
+            | "by"
+            | "it"
+            | "its"
+            | "this"
+            | "that"
+            | "these"
+            | "those"
+            | "i"
+            | "you"
+            | "he"
+            | "she"
+            | "we"
+            | "they"
+            | "my"
+            | "your"
+            | "his"
+            | "her"
+            | "our"
+            | "their"
+            | "me"
+            | "him"
+            | "them"
+            | "do"
+            | "does"
+            | "did"
+            | "has"
+            | "have"
+            | "had"
+            | "will"
+            | "would"
+            | "can"
+            | "could"
+            | "should"
+            | "from"
+            | "about"
+            | "so"
+    )
+}
+
+// Tokenize like `norm` (lowercased, alphanumeric, whitespace-split) but drop
+// stopwords and 1-char tokens. Used for both the corpus and the query so the
+// TF-IDF vocabulary is shared.
+fn tfidf_tokens(text: &str) -> Vec<String> {
+    norm(text)
+        .split_whitespace()
+        .filter(|tok| tok.len() > 1 && !is_stopword(tok))
+        .map(str::to_string)
+        .collect()
+}
+
+// Document frequency over the candidate corpus, returned as smoothed inverse
+// document frequency: idf(term) = ln((N + 1) / (df + 1)) + 1. A term in every
+// document tends toward the floor; a rare term gets a larger weight. Computed at
+// query time from the stored memory text — no persisted field is required.
+fn inverse_document_frequency<'a, I>(documents: I) -> HashMap<String, f32>
+where
+    I: IntoIterator<Item = &'a String>,
+{
+    let mut df: HashMap<String, u32> = HashMap::new();
+    let mut total: u32 = 0;
+    for doc in documents {
+        total += 1;
+        let mut seen: Vec<String> = Vec::new();
+        for tok in tfidf_tokens(doc) {
+            if !seen.contains(&tok) {
+                seen.push(tok.clone());
+                *df.entry(tok).or_insert(0) += 1;
+            }
+        }
+    }
+    let n = total as f32;
+    df.into_iter()
+        .map(|(term, count)| {
+            let idf = ((n + 1.0) / (count as f32 + 1.0)).ln() + 1.0;
+            (term, idf)
+        })
+        .collect()
+}
+
+// L2-normalized TF-IDF vector keyed by token. Term frequency is the raw count in
+// `text`; weight = tf * idf, where idf for terms unseen in the corpus defaults
+// to a neutral 1.0 (so a query term absent from the corpus contributes but is
+// not over-weighted).
+fn tfidf_vector(text: &str, idf: &HashMap<String, f32>) -> HashMap<String, f32> {
+    let mut tf: HashMap<String, f32> = HashMap::new();
+    for tok in tfidf_tokens(text) {
+        *tf.entry(tok).or_insert(0.0) += 1.0;
+    }
+    let mut weights: HashMap<String, f32> = tf
+        .into_iter()
+        .map(|(term, count)| {
+            let w = count * idf.get(&term).copied().unwrap_or(1.0);
+            (term, w)
+        })
+        .collect();
+    let mag = weights.values().map(|w| w * w).sum::<f32>().sqrt();
+    if mag > 0.0 {
+        for w in weights.values_mut() {
+            *w /= mag;
+        }
+    }
+    weights
+}
+
+// Cosine similarity over two sparse token->weight maps. Both inputs are already
+// L2-normalized, so this is just the dot product over shared keys, clamped into
+// [0, 1] to guard against tiny floating-point excursions.
+fn cosine_map(a: &HashMap<String, f32>, b: &HashMap<String, f32>) -> f32 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let (small, large) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    let dot: f32 = small
+        .iter()
+        .filter_map(|(term, wa)| large.get(term).map(|wb| wa * wb))
+        .sum();
+    dot.clamp(0.0, 1.0)
 }
 
 fn kind_priority(kind: &str) -> f32 {
@@ -2209,7 +2423,7 @@ mod tests {
     #[test]
     fn isolated_store_uses_isolated_handoff_file() -> Result<()> {
         let workspace = temp_workspace("handoff-isolated")?;
-        let root = workspace.join(".biscuits/eval_sessions/case");
+        let root = workspace.join("biscuits/eval_sessions/case");
         let store = MemoryStore::open_isolated(workspace.clone(), root.clone())?;
 
         assert_eq!(
@@ -2288,5 +2502,247 @@ mod tests {
             std::env::temp_dir().join(format!("biscuits-{name}-{}-{}", std::process::id(), now()));
         fs::create_dir_all(&path)?;
         Ok(path)
+    }
+
+    // Insert a memory directly into the graph with deterministic, clock-free
+    // fields so retrieval behavior can be asserted without timing flakiness.
+    fn seed(store: &mut MemoryStore, text: &str, kind: &str, access_count: u64) {
+        let id = store.next_id("mem");
+        store.graph.memories.push(MemoryRecord {
+            id,
+            kind: kind.to_string(),
+            category: "facts".into(),
+            text: text.to_string(),
+            confidence: 0.9,
+            source: "test".into(),
+            created_at: 1_000,
+            updated_at: 1_000,
+            access_count,
+            sensitivity: "public".into(),
+            decay: "slow".into(),
+            conversation_origin: None,
+            embedding: embed(text),
+            entities: Vec::new(),
+            active: true,
+        });
+    }
+
+    fn retrieved_texts(store: &MemoryStore, query: &str) -> Vec<String> {
+        store
+            .retrieve(query)
+            .iter()
+            .map(|r| store.graph.memories[r.index].text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn retrieval_gate_excludes_off_topic_memories() -> Result<()> {
+        let workspace = temp_workspace("retrieve-gate")?;
+        let mut store = MemoryStore::open(workspace.clone())?;
+
+        // Topic A: Rust async runtime work. Topic B: unrelated gardening.
+        seed(
+            &mut store,
+            "The Rust async runtime uses tokio for spawning tasks",
+            "semantic_fact",
+            0,
+        );
+        seed(
+            &mut store,
+            "Rust borrow checker enforces ownership at compile time",
+            "semantic_fact",
+            0,
+        );
+        seed(
+            &mut store,
+            "Tomato seedlings need watering twice a week in summer",
+            "semantic_fact",
+            0,
+        );
+        seed(
+            &mut store,
+            "The recipe for sourdough bread requires a starter culture",
+            "semantic_fact",
+            0,
+        );
+
+        let got = retrieved_texts(&store, "how does the rust async runtime tokio spawn tasks");
+
+        assert!(
+            got.iter().any(|t| t.contains("tokio")),
+            "topic-A memory should be retrieved, got {got:?}"
+        );
+        assert!(
+            !got.iter().any(|t| t.contains("Tomato")),
+            "off-topic gardening memory must be excluded, got {got:?}"
+        );
+        assert!(
+            !got.iter().any(|t| t.contains("sourdough")),
+            "off-topic recipe memory must be excluded, got {got:?}"
+        );
+
+        fs::remove_dir_all(workspace).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn access_count_does_not_leak_irrelevant_memories() -> Result<()> {
+        let workspace = temp_workspace("retrieve-feedback")?;
+        let mut store = MemoryStore::open(workspace.clone())?;
+
+        // An off-topic memory that has been retrieved an enormous number of
+        // times. Under the old additive scoring its frequency term alone would
+        // clear the gate; under the new design relevance gates independently.
+        seed(
+            &mut store,
+            "Tomato seedlings need watering twice a week in summer",
+            "semantic_fact",
+            10_000,
+        );
+        // A genuinely relevant, never-before-retrieved memory.
+        seed(
+            &mut store,
+            "The Rust async runtime uses tokio for spawning tasks",
+            "semantic_fact",
+            0,
+        );
+
+        let query = "how does the rust async runtime tokio spawn tasks";
+
+        // No matter how many times the loop simulates retrieval-with-increment,
+        // the irrelevant high-access memory never crosses the gate.
+        for _ in 0..50 {
+            let got = retrieved_texts(&store, query);
+            assert!(
+                !got.iter().any(|t| t.contains("Tomato")),
+                "high-access off-topic memory leaked through gate: {got:?}"
+            );
+            assert!(
+                got.iter().any(|t| t.contains("tokio")),
+                "relevant memory should still be retrieved: {got:?}"
+            );
+            // Mimic system_context's side effect: bump every served memory.
+            if let Some(idx) = store
+                .graph
+                .memories
+                .iter()
+                .position(|m| m.text.contains("Tomato"))
+            {
+                store.graph.memories[idx].access_count += 1;
+            }
+        }
+
+        fs::remove_dir_all(workspace).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn tfidf_weights_rare_terms_above_common_terms() {
+        // Corpus where "rust" appears in every document (common) and "kubernetes"
+        // appears in exactly one (rare).
+        let corpus: Vec<String> = vec![
+            "rust async runtime".into(),
+            "rust borrow checker".into(),
+            "rust trait objects".into(),
+            "rust kubernetes operator".into(),
+        ];
+        let idf = inverse_document_frequency(corpus.iter());
+
+        let common = idf.get("rust").copied().expect("rust present");
+        let rare = idf.get("kubernetes").copied().expect("kubernetes present");
+        assert!(
+            rare > common,
+            "rare term idf ({rare}) should exceed common term idf ({common})"
+        );
+
+        // And the rare term should dominate a relevance match: a document sharing
+        // only the rare term must outscore one sharing only the common term.
+        let query = tfidf_vector("rust kubernetes", &idf);
+        let doc_rare = tfidf_vector("kubernetes operator", &idf);
+        let doc_common = tfidf_vector("rust runtime", &idf);
+        let sim_rare = cosine_map(&query, &doc_rare);
+        let sim_common = cosine_map(&query, &doc_common);
+        assert!(
+            sim_rare > sim_common,
+            "rare-term overlap ({sim_rare}) should beat common-term overlap ({sim_common})"
+        );
+    }
+
+    // Degenerate inputs must never produce NaN/Inf and must score finitely in
+    // [0, 1]. These guard the divide-by-zero paths in the L2 normalization and
+    // cosine (empty query, empty document, single-document corpus where df == N).
+    #[test]
+    fn scoring_is_finite_on_degenerate_inputs() {
+        // Empty corpus -> empty idf map.
+        let empty_idf = inverse_document_frequency(std::iter::empty::<&String>());
+        assert!(empty_idf.is_empty());
+
+        // Empty query vector and empty document vector.
+        let empty_query = tfidf_vector("", &empty_idf);
+        let empty_doc = tfidf_vector("", &empty_idf);
+        assert!(empty_query.is_empty());
+        let s = cosine_map(&empty_query, &empty_doc);
+        assert!(s.is_finite() && s == 0.0, "empty/empty cosine was {s}");
+
+        // Stopword-only / single-char-only text tokenizes to nothing.
+        let q_stop = tfidf_vector("the a is of", &empty_idf);
+        assert!(q_stop.is_empty(), "stopword-only query should be empty");
+
+        // Single-document corpus: every term has df == N == 1, so idf == 1.0
+        // (smoothed, never 0 or negative). Self-similarity must be exactly 1.0.
+        let one: Vec<String> = vec!["kubernetes operator reconcile loop".into()];
+        let idf = inverse_document_frequency(one.iter());
+        for w in idf.values() {
+            assert!(
+                w.is_finite() && *w >= 1.0,
+                "idf weight {w} not >= 1 / finite"
+            );
+        }
+        let v = tfidf_vector(&one[0], &idf);
+        let self_sim = cosine_map(&v, &v);
+        assert!(
+            self_sim.is_finite() && (self_sim - 1.0).abs() < 1e-5,
+            "self-similarity should be ~1.0, was {self_sim}"
+        );
+
+        // A query that shares no tokens with the document must score finite 0.
+        let other = tfidf_vector("completely unrelated gardening tomatoes", &idf);
+        let cross = cosine_map(&v, &other);
+        assert!(
+            cross.is_finite() && cross == 0.0,
+            "disjoint cosine was {cross}"
+        );
+    }
+
+    #[test]
+    fn empty_query_does_not_leak_memories_through_gate() -> Result<()> {
+        // An empty (or stopword-only) query produces an all-zero relevance for
+        // every candidate. With no entity match, nothing should clear the gate.
+        let workspace = temp_workspace("retrieve-empty-query")?;
+        let mut store = MemoryStore::open(workspace.clone())?;
+        seed(
+            &mut store,
+            "The Rust async runtime uses tokio for spawning tasks",
+            "semantic_fact",
+            0,
+        );
+        seed(
+            &mut store,
+            "Tomato seedlings need watering twice a week",
+            "semantic_fact",
+            0,
+        );
+
+        assert!(
+            retrieved_texts(&store, "").is_empty(),
+            "empty query must retrieve nothing"
+        );
+        assert!(
+            retrieved_texts(&store, "the a is of and").is_empty(),
+            "stopword-only query must retrieve nothing"
+        );
+
+        fs::remove_dir_all(workspace).ok();
+        Ok(())
     }
 }

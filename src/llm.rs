@@ -229,6 +229,15 @@ pub struct Totals {
     estimated: bool,
 }
 
+impl Totals {
+    pub fn turns(&self) -> u64 {
+        self.turns
+    }
+    pub fn tokens(&self) -> u64 {
+        self.tokens
+    }
+}
+
 pub async fn setup(client: &Client) -> Result<Config> {
     let cwd = env::current_dir()?.display().to_string();
     let default_prompt = format!(
@@ -930,10 +939,11 @@ pub fn print_usage_snapshot(usage: UsageSnapshot, totals: &mut Totals) {
 
     let mark = if usage.estimated { " approx" } else { "" };
     let total_mark = if totals.estimated { " approx" } else { "" };
-    println!(
-        "\n[tokens{mark}] input={} output={} total={} | session turns={} total={}{}",
+    let line = format!(
+        "[tokens{mark}] in {} · out {} · total {} | session {} turns · {} tok{}",
         usage.input, usage.output, usage.total, totals.turns, totals.tokens, total_mark
     );
+    println!("\n{}", crate::ui::grey(&line));
 }
 
 fn clean_base(url: &str) -> &str {

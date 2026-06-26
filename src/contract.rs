@@ -65,11 +65,11 @@ requirements, edge cases, and regressions. Be specific and concrete. \
 Return ONLY strict JSON, no prose, no markdown fences.";
 
 impl TestContract {
-    /// Atomic temp+rename writes of `.biscuits/test_contract.json` (pretty) and a
+    /// Atomic temp+rename writes of `biscuits/test_contract.json` (pretty) and a
     /// human-readable `biscuit/test-contract.md` (checkbox list). Parent
     /// directories are created if missing.
     pub fn save(&self, workspace: &Path) -> Result<()> {
-        let biscuits_dir = workspace.join(".biscuits");
+        let biscuits_dir = workspace.join("biscuits");
         let biscuit_dir = workspace.join("biscuit");
         fs::create_dir_all(&biscuits_dir)?;
         fs::create_dir_all(&biscuit_dir)?;
@@ -186,7 +186,7 @@ impl TestContract {
 
 /// Load a previously saved contract, or `None` if it is missing or unreadable.
 pub fn load(workspace: &Path) -> Option<TestContract> {
-    let path = workspace.join(".biscuits").join("test_contract.json");
+    let path = workspace.join("biscuits").join("test_contract.json");
     let text = fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
 }
@@ -211,7 +211,7 @@ pub fn record_result(workspace: &Path, id: &str, pass: bool, note: &str) -> Resu
 ///
 /// Context = `git diff` + `git status --porcelain` (run in `workspace`), or — if
 /// this is not a git repo — the tail of `biscuit/logs.md`, plus the contents of
-/// BISCUITS.md, biscuit/handoff.md, and .biscuits/goal_plan.json when present.
+/// BISCUITS.md, biscuit/handoff.md, and biscuits/goal_plan.json when present.
 ///
 /// Only a failed LLM call is an error; malformed or empty model output yields a
 /// contract with an empty checklist (the changed[] list is still populated
@@ -290,8 +290,8 @@ fn gather_project_knowledge(workspace: &Path) -> String {
             workspace.join("biscuit").join("handoff.md"),
         ),
         (
-            ".biscuits/goal_plan.json",
-            workspace.join(".biscuits").join("goal_plan.json"),
+            "biscuits/goal_plan.json",
+            workspace.join("biscuits").join("goal_plan.json"),
         ),
     ];
     for (label, path) in sources {
@@ -750,7 +750,7 @@ mod tests {
         assert!(md.contains("# Test Contract"));
 
         // JSON file exists and is pretty-printed (multi-line).
-        let json = fs::read_to_string(dir.join(".biscuits").join("test_contract.json")).unwrap();
+        let json = fs::read_to_string(dir.join("biscuits").join("test_contract.json")).unwrap();
         assert!(json.contains('\n'));
 
         let _ = fs::remove_dir_all(dir);

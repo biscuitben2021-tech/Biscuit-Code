@@ -36,7 +36,7 @@ const FLAG_COMMAND: u64 = 1 << 20;
 impl ComputerUseRuntime {
     pub fn new(workspace: PathBuf) -> Self {
         let workspace = workspace.canonicalize().unwrap_or(workspace);
-        let screenshot_dir = workspace.join(".biscuits/computer_use/screenshots");
+        let screenshot_dir = workspace.join("biscuits/computer_use/screenshots");
         Self {
             workspace,
             screenshot_dir,

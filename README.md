@@ -72,7 +72,7 @@ API keys are requested at launch or read from environment variables. The saved p
 
 Biscuits keeps project-local state in the folder you launch it from:
 
-- `.biscuits/` for conversations, settings, goals, eval reports, MCP config, skill state, and runtime state
+- `biscuits/` for conversations, settings, goals, eval reports, MCP config, skill state, and runtime state
 - `BISCUITS.md` for editable project memory
 - `biscuit/handoff.md` for current project requirements and handoff notes
 - `biscuit/logs.md` for runtime-maintained change logs
@@ -117,12 +117,12 @@ spawn further sub-agents.
 
 ## Hooks
 
-Drop a `.biscuits/hooks.json` to run your own shell commands around tool calls:
+Drop a `biscuits/hooks.json` to run your own shell commands around tool calls:
 
 ```json
 {
   "pre_tool":  ["./scripts/guard.sh"],
-  "post_tool": ["echo \"$BISCUITS_TOOL ran\" >> .biscuits/tool.log"],
+  "post_tool": ["echo \"$BISCUITS_TOOL ran\" >> biscuits/tool.log"],
   "stop":      ["say done"]
 }
 ```
@@ -140,6 +140,8 @@ BISCUITS_TOOL_MODE=native   use each provider's native function-calling API
 BISCUITS_RENDER=raw         stream the answer as raw text instead of the
                             default Markdown rendering
 NO_COLOR=1                  disable ANSI colors
+BISCUITS_INPUT=box          use the multi-line bordered input box instead of the
+                            plain prompt
 ```
 
 ## Skills
@@ -158,7 +160,7 @@ same skill name appears in more than one place, the higher-precedence copy
 wins:
 
 ```text
-.biscuits/skills/<name>/SKILL.md   # project skills (per workspace, not committed)
+biscuits/skills/<name>/SKILL.md   # project skills (per workspace, not committed)
 skills/<name>/SKILL.md             # shared repo skills (commit to share with your team)
 <config>/biscuits/skills/<name>/SKILL.md   # your personal global skills
 ```
@@ -220,7 +222,7 @@ guidance, not absolute truth — your latest instructions always override them.
 /skills selected <message> debug which skills a message would select
 ```
 
-Enable/disable state is stored in `.biscuits/skills.json`; the `SKILL.md`
+Enable/disable state is stored in `biscuits/skills.json`; the `SKILL.md`
 source files are never modified. Skills work the same on macOS, Windows, and
 Linux.
 

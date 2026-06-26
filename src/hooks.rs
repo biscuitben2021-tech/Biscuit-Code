@@ -1,13 +1,13 @@
 //! User-defined lifecycle hooks. The agent runs shell commands the user configures
-//! in `.biscuits/hooks.json` around tool calls and at turn end. A `pre_tool` hook
+//! in `biscuits/hooks.json` around tool calls and at turn end. A `pre_tool` hook
 //! that exits non-zero blocks the tool call (and its output is fed back to the
 //! model), which lets a user enforce policy the model can't bypass.
 //!
-//! Example `.biscuits/hooks.json`:
+//! Example `biscuits/hooks.json`:
 //! ```json
 //! {
 //!   "pre_tool":  ["./scripts/guard.sh"],
-//!   "post_tool": ["echo \"$BISCUITS_TOOL ran\" >> .biscuits/tool.log"],
+//!   "post_tool": ["echo \"$BISCUITS_TOOL ran\" >> biscuits/tool.log"],
 //!   "stop":      ["say done"]
 //! }
 //! ```
@@ -51,7 +51,7 @@ pub struct HookOutcome {
 
 impl Hooks {
     pub fn open(workspace: &Path) -> Self {
-        let path = workspace.join(".biscuits/hooks.json");
+        let path = workspace.join("biscuits/hooks.json");
         let config = std::fs::read_to_string(&path)
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())

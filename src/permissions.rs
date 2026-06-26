@@ -382,7 +382,7 @@ pub struct PermissionGuard {
 
 impl PermissionGuard {
     pub fn open(workspace: &Path) -> Self {
-        let config_path = workspace.join(".biscuits/permissions.json");
+        let config_path = workspace.join("biscuits/permissions.json");
         let mode = fs::read_to_string(&config_path)
             .ok()
             .and_then(|s| serde_json::from_str::<ModeFile>(&s).ok())

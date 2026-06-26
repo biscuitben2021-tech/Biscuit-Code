@@ -7,6 +7,7 @@ mod evals;
 mod goals;
 pub mod gui;
 mod hooks;
+mod input;
 mod llm;
 mod markdown;
 mod mcp;
@@ -15,6 +16,7 @@ mod observations;
 mod permissions;
 mod shell;
 mod skills;
+mod statusbar;
 mod test_harness;
 mod tools;
 mod ui;
@@ -30,6 +32,16 @@ use std::{
 };
 
 pub async fn run() -> Result<()> {
+    // One-time, best-effort migration: the per-workspace state folder used to be
+    // hidden (`.biscuits`). Make it visible (`biscuits`) by renaming it in place,
+    // preserving all existing user state. Only migrate when the old folder exists
+    // and the new one does not, so we never clobber or delete anything.
+    if let Ok(ws) = std::env::current_dir() {
+        if ws.join(".biscuits").exists() && !ws.join("biscuits").exists() {
+            let _ = std::fs::rename(ws.join(".biscuits"), ws.join("biscuits"));
+        }
+    }
+
     let args = env::args().skip(1).collect::<Vec<_>>();
     if let Some(cmd) = args.first().map(String::as_str) {
         match cmd {
@@ -51,7 +63,7 @@ pub async fn run() -> Result<()> {
         println!("eval: biscuits eval --smoke");
         println!("harness: biscuits harness baseline|run|diff");
         println!(
-            "commands: /help, /clear, /remember, /forget, /memories, /handoff, /biscuits, /sessions, /resume, /last, /config, /shortcut, /goal, /plan, /observe, /computer-use, /browser, /mcp, /skills, /memory-mode, /privacy, /permissions"
+            "commands: /help, /clear, /remember, /forget, /memories, /handoff, /biscuits, /sessions, /resume, /last, /config, /shortcut, /goal, /plan, /observe, /computer-use, /browser, /mcp, /plugins, /install, /skills, /test, /ultracode, /focus, /configure, /memory-mode, /privacy, /permissions"
         );
         return Ok(());
     }
@@ -78,6 +90,11 @@ pub async fn run() -> Result<()> {
                     stop_flag.store(true, Relaxed);
                     eprintln!("\n[stopping] halting after the current step…");
                 } else {
+                    // process::exit skips Drop, so reset any status-bar scroll
+                    // region here — otherwise the shell prompt is left stuck
+                    // inside the reserved region after Ctrl-C.
+                    print!("\x1b[r");
+                    let _ = io::stdout().flush();
                     eprintln!();
                     std::process::exit(0);
                 }
@@ -89,6 +106,10 @@ pub async fn run() -> Result<()> {
     let mut totals = llm::Totals::default();
     let mut line = String::new();
 
+    // Opt-in persistent bottom status bar (BISCUITS_STATUSBAR=1). Created before
+    // the banner so its scroll region is in place when the banner prints.
+    let mut status = statusbar::StatusBar::new();
+
     ui::banner(
         env!("CARGO_PKG_VERSION"),
         &env::current_dir()?.display().to_string(),
@@ -96,17 +117,52 @@ pub async fn run() -> Result<()> {
         perms.mode.label(),
         perms.mode.subtitle(),
     );
+    if tools.ultracode() {
+        println!("  {}\n", ui::ultracode_badge());
+    }
+    let draw_status = |status: &mut statusbar::StatusBar,
+                       totals: &llm::Totals,
+                       tools: &tools::ToolRuntime,
+                       perms: &PermissionGuard| {
+        if status.active() {
+            let (added, removed) = statusbar::git_lines_changed(&workspace);
+            status.set(&statusbar::format_bar(
+                perms.mode.label(),
+                tools.ultracode(),
+                totals.turns(),
+                totals.tokens(),
+                added,
+                removed,
+            ));
+        }
+    };
+    draw_status(&mut status, &totals, &tools, &perms);
 
     loop {
         line.clear();
-        print!("{}", ui::user_prompt());
-        io::stdout().flush()?;
-        let read = io::stdin().read_line(&mut line)?;
-        if read == 0 {
-            // EOF (Ctrl-D or closed/piped stdin): exit cleanly instead of
-            // spinning forever on an empty prompt.
-            println!();
-            break;
+        // Opt-in bordered input box (BISCUITS_INPUT=box). When it returns
+        // Some(text), use it as the typed line (newline-terminated to match the
+        // read_line contract). When it returns None, fall back to the plain
+        // read_line path for this iteration — and if the flag is off, we never
+        // call it at all, so the default behavior is byte-for-byte unchanged.
+        let mut handled_by_box = false;
+        if input::box_enabled() {
+            if let Some(text) = input::read_line_box(&ui::user_prompt())? {
+                line.push_str(&text);
+                line.push('\n');
+                handled_by_box = true;
+            }
+        }
+        if !handled_by_box {
+            print!("{}", ui::user_prompt());
+            io::stdout().flush()?;
+            let read = io::stdin().read_line(&mut line)?;
+            if read == 0 {
+                // EOF (Ctrl-D or closed/piped stdin): exit cleanly instead of
+                // spinning forever on an empty prompt.
+                println!();
+                break;
+            }
         }
 
         let prompt = line.trim();
@@ -119,6 +175,38 @@ pub async fn run() -> Result<()> {
             break;
         }
         if prompt.starts_with('/') {
+            if prompt == "/configure" || prompt == "/settings" {
+                let mut out = ui::bold(&ui::cyan("Biscuit Code — configuration"));
+                out.push('\n');
+                out.push_str(&format!(
+                    "  provider   {}\n",
+                    llm::provider_name(config.provider)
+                ));
+                out.push_str(&format!("  model      {}\n", config.model));
+                out.push_str(&format!(
+                    "  mode       {} — {}\n",
+                    perms.mode.label(),
+                    perms.mode.subtitle()
+                ));
+                out.push_str(&format!(
+                    "  ultracode  {}\n",
+                    if tools.ultracode() { "on" } else { "off" }
+                ));
+                out.push_str(&format!("  focus      {}\n", tools.focus_display()));
+                out.push_str(&format!("  state      {}\n", memory.root().display()));
+                for cmd in ["/skills", "/mcp list", "/plugins"] {
+                    if let Ok(Some(section)) = tools.command_output(cmd) {
+                        out.push('\n');
+                        out.push_str(section.trim_end());
+                        out.push('\n');
+                    }
+                }
+                out.push_str(&ui::grey(
+                    "\nchange: /permissions  /memory-mode  /privacy  /ultracode  /skills  /mcp  /plugins  /focus",
+                ));
+                println!("{out}");
+                continue;
+            }
             if let Some(output) = perms.command_output(prompt) {
                 println!("{output}");
                 continue;
@@ -143,11 +231,14 @@ pub async fn run() -> Result<()> {
         perms
             .stop_requested
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        // Re-render the just-typed message as a right-aligned chat bubble.
+        ui::echo_user(prompt);
         let extra_context = test_harness::baseline_context(&workspace);
         turn_active.store(true, std::sync::atomic::Ordering::Relaxed);
         // A turn error (transient API failure, malformed model output, a snapshot
         // I/O hiccup) must not crash the whole REPL and discard the session —
-        // report it and keep going.
+        // report it and keep going. The per-turn token line is printed inside the
+        // turn (right after the answer) so it can't interrupt the next message.
         let turn_result = agent::run_turn(
             &client,
             &config,
@@ -159,17 +250,14 @@ pub async fn run() -> Result<()> {
             &extra_context,
             true,
             0,
+            &mut totals,
         )
         .await;
         turn_active.store(false, std::sync::atomic::Ordering::Relaxed);
-        match turn_result {
-            Ok(capture) => {
-                llm::print_usage_snapshot(capture.token_usage, &mut totals);
-            }
-            Err(err) => {
-                eprintln!("\n{}", ui::error(&err.to_string()));
-            }
+        if let Err(err) = turn_result {
+            eprintln!("\n{}", ui::error(&err.to_string()));
         }
+        draw_status(&mut status, &totals, &tools, &perms);
         println!();
     }
 

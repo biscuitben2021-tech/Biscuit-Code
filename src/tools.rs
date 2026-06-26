@@ -32,6 +32,13 @@ pub struct ToolRuntime {
     /// inside a sub-agent so it can't recurse into more sub-agents.
     allow_subagents: bool,
     hooks: Hooks,
+    /// Ultracode: a max-effort mode that asks the agent to be exhaustive, fan out
+    /// to sub-agents, and verify before finishing (raises the per-turn round cap
+    /// and sub-agent depth). Persisted per workspace.
+    ultracode: bool,
+    /// A workspace-relative file the user has pinned with `/focus`; its current
+    /// contents are injected into every turn so the agent keeps it front-of-mind.
+    focus: Option<String>,
 }
 
 struct Monitor {
@@ -137,6 +144,7 @@ impl ToolRuntime {
         let skills = SkillStore::open(&workspace)?;
         let browser = BrowserRuntime::new(&workspace);
         let hooks = Hooks::open(&workspace);
+        let ultracode = load_ultracode(&workspace);
         Ok(Self {
             workspace,
             goals,
@@ -149,7 +157,88 @@ impl ToolRuntime {
             next_monitor: 1,
             allow_subagents: true,
             hooks,
+            ultracode,
+            focus: None,
         })
+    }
+
+    /// Whether ultracode (max-effort) mode is enabled.
+    pub fn ultracode(&self) -> bool {
+        self.ultracode
+    }
+
+    /// Human-readable description of the focused file for `/configure`.
+    pub fn focus_display(&self) -> String {
+        self.focus.clone().unwrap_or_else(|| "(none)".to_string())
+    }
+
+    /// The `<focused_file>` context block for the current turn, or empty when no
+    /// file is pinned or it can't be read. Read fresh each turn so edits show up.
+    pub fn focus_context(&self) -> String {
+        let Some(rel) = &self.focus else {
+            return String::new();
+        };
+        match self
+            .existing_path(rel)
+            .and_then(|p| Ok(fs::read_to_string(p)?))
+        {
+            Ok(content) => format!(
+                "<focused_file path=\"{}\">\n{}\n</focused_file>",
+                rel,
+                truncate(&content, 16_000)
+            ),
+            Err(_) => String::new(),
+        }
+    }
+
+    /// Handle `/focus [<path>|clear]`.
+    fn focus_command(&mut self, arg: &str) -> Result<String> {
+        if arg.is_empty() {
+            return Ok(match &self.focus {
+                Some(p) => format!("focused file: {p}\nclear with /focus clear"),
+                None => "no focused file. pin one with /focus <path>".into(),
+            });
+        }
+        if arg == "clear" || arg == "off" || arg == "none" {
+            self.focus = None;
+            return Ok("focus cleared".into());
+        }
+        // Validate the file exists and is inside the workspace before pinning.
+        let path = self.existing_path(arg)?;
+        self.ensure_not_biscuit_log(&path)?;
+        let rel = rel(&self.workspace, &path);
+        self.focus = Some(rel.clone());
+        Ok(format!(
+            "focused on {rel} (its contents are now included each turn)"
+        ))
+    }
+
+    /// Handle `/ultracode [on|off|toggle|status]`.
+    fn ultracode_command(&mut self, arg: &str) -> Result<String> {
+        let want = match arg.to_lowercase().as_str() {
+            "" | "status" => {
+                return Ok(format!(
+                    "ultracode: {}\n{}\nset with /ultracode on | off",
+                    if self.ultracode { "on" } else { "off" },
+                    ULTRACODE_BLURB
+                ));
+            }
+            "on" | "enable" | "1" | "true" => true,
+            "off" | "disable" | "0" | "false" => false,
+            "toggle" => !self.ultracode,
+            other => return Ok(format!("unknown option '{other}'. use /ultracode on | off")),
+        };
+        self.ultracode = want;
+        save_ultracode(&self.workspace, want);
+        Ok(format!(
+            "ultracode: {}{}",
+            if want { "on" } else { "off" },
+            if want {
+                format!("\n{ULTRACODE_BLURB}")
+            } else {
+                String::new()
+            }
+        ))
     }
 
     /// Configured lifecycle hooks for this workspace.
@@ -358,6 +447,16 @@ Available tools:
     }
 
     pub fn command_output(&mut self, input: &str) -> Result<Option<String>> {
+        if let Some(rest) = input.strip_prefix("/ultracode") {
+            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                return Ok(Some(self.ultracode_command(rest.trim())?));
+            }
+        }
+        if let Some(rest) = input.strip_prefix("/focus") {
+            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                return Ok(Some(self.focus_command(rest.trim())?));
+            }
+        }
         if let Some(output) = self.observation_command_output(input)? {
             return Ok(Some(output));
         }
@@ -871,6 +970,42 @@ impl Drop for ToolRuntime {
     }
 }
 
+/// One-line human description of ultracode shown by `/ultracode`.
+const ULTRACODE_BLURB: &str =
+    "max-effort mode: be exhaustive, split work across sub-agents, verify before finishing.";
+
+/// System-prompt directive injected each turn while ultracode is on. Original
+/// wording — it instructs the agent to spend effort, decompose, and self-verify.
+pub const ULTRACODE_DIRECTIVE: &str = "<ultracode>\nUltracode is ON. Optimize for the most thorough, correct result — not for speed or brevity; token cost is not a concern.\n- Decompose non-trivial work and use the Task tool to spawn focused sub-agents that investigate or implement parts in parallel, then fold their reports together.\n- For research/review/debugging, gather evidence from multiple angles and prefer a Task sub-agent to adversarially verify a finding before you rely on it.\n- After producing a result, double-check it: re-read what you changed, run the relevant build/tests, and only finish once it is genuinely done and the checks pass.\n- Keep going until the task is complete; do not stop early or hand back partial work.\n</ultracode>";
+
+fn ultracode_path(workspace: &Path) -> PathBuf {
+    workspace.join("biscuits").join("ultracode.json")
+}
+
+fn load_ultracode(workspace: &Path) -> bool {
+    let path = ultracode_path(workspace);
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|v| v.get("enabled").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
+fn save_ultracode(workspace: &Path, enabled: bool) {
+    let root = workspace.join("biscuits");
+    if fs::create_dir_all(&root).is_err() {
+        return;
+    }
+    let path = ultracode_path(workspace);
+    let tmp = path.with_extension("json.tmp");
+    let body = format!("{{\n  \"enabled\": {enabled}\n}}\n");
+    if fs::write(&tmp, body).is_ok() {
+        let _ = fs::rename(&tmp, &path);
+    }
+}
+
 pub struct ParsedCalls {
     pub calls: Vec<ToolCall>,
     pub errors: Vec<String>,
@@ -937,8 +1072,14 @@ pub fn parse_calls(text: &str) -> ParsedCalls {
 }
 
 pub fn brief(text: &str) -> String {
-    let lines = text.lines().take(12).collect::<Vec<_>>().join("\n");
-    truncate(&lines, 1200)
+    // One-line summary for the collapsed tool view. The full result is available
+    // on expand, so the inline line stays compact (was up to 12 lines).
+    let first = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    truncate(first, 120)
 }
 
 fn json_to_call(text: &str) -> Result<ToolCall> {
@@ -1104,6 +1245,18 @@ fn truncate(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ultracode_persists_and_defaults_off() {
+        let dir = std::env::temp_dir().join(format!("biscuit-ultra-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        assert!(!load_ultracode(&dir), "defaults off when unset");
+        save_ultracode(&dir, true);
+        assert!(load_ultracode(&dir), "reads back enabled");
+        save_ultracode(&dir, false);
+        assert!(!load_ultracode(&dir), "reads back disabled");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn parse_calls_collects_errors_instead_of_panicking() {

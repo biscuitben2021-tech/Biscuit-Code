@@ -386,12 +386,12 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "get_test_contract",
-            "description": "Read .biscuits/test_contract.json from the current working directory and return it. Defines the test cases this driver should execute.",
+            "description": "Read biscuits/test_contract.json from the current working directory and return it. Defines the test cases this driver should execute.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         },
         {
             "name": "report_result",
-            "description": "Record a test result back into .biscuits/test_contract.json: id, pass (bool) and an optional note.",
+            "description": "Record a test result back into biscuits/test_contract.json: id, pass (bool) and an optional note.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -573,7 +573,7 @@ fn one_line(text: &str, max: usize) -> String {
 fn test_contract_path() -> PathBuf {
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
-        .join(".biscuits")
+        .join("biscuits")
         .join("test_contract.json")
 }
 
@@ -581,7 +581,7 @@ fn get_test_contract() -> Result<String> {
     let path = test_contract_path();
     let text = std::fs::read_to_string(&path).with_context(|| {
         format!(
-            "no test contract at {}; create .biscuits/test_contract.json with your test cases",
+            "no test contract at {}; create biscuits/test_contract.json with your test cases",
             path.display()
         )
     })?;
@@ -1023,7 +1023,7 @@ mod mac {
         pub fn new() -> Self {
             let screenshot_dir = std::env::current_dir()
                 .unwrap_or_else(|_| PathBuf::from("."))
-                .join(".biscuits")
+                .join("biscuits")
                 .join("gui")
                 .join("screenshots");
             Self {
@@ -1630,7 +1630,7 @@ mod tests {
 
     #[test]
     fn report_result_roundtrips_through_contract_file() {
-        // Use a temp cwd so we don't clobber the real .biscuits dir.
+        // Use a temp cwd so we don't clobber the real biscuits dir.
         let dir = std::env::temp_dir().join(format!("gui_test_{}", now_nanos_test()));
         std::fs::create_dir_all(&dir).unwrap();
         let prev = std::env::current_dir().unwrap();

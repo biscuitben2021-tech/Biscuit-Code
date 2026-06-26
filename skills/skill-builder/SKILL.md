@@ -42,7 +42,7 @@ proceed once you have enough.
 5. **Constraints / gotchas** — Anything it must NOT do, edge cases, or
    project-specific conventions to respect.
 6. **Where should it live?**
-   - **Project only** (per workspace, not committed): `.biscuits/skills/<name>/SKILL.md`
+   - **Project only** (per workspace, not committed): `biscuits/skills/<name>/SKILL.md`
    - **Shared with the repo** (committed for the team): `skills/<name>/SKILL.md`
    - **Global** (just you, every project): the OS config dir —
      macOS `~/Library/Application Support/biscuits/skills/<name>/SKILL.md`,
@@ -123,7 +123,7 @@ Then create it:
 - `name` must be unique; if it collides with an existing skill, the
   higher-precedence location wins (project > repo > global). Pick a distinct
   name or confirm the override with the user.
-- Enable/disable state lives in `.biscuits/skills.json`; never edit a skill's
+- Enable/disable state lives in `biscuits/skills.json`; never edit a skill's
   enabled state by hand-editing other skills — only set this skill's own
   `enabled:` field.
 - If the user wants a *format-conversion* skill specifically, point them at the

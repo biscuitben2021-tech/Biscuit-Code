@@ -261,7 +261,7 @@ async fn run_case(
     case: &EvalCase,
     skip_rubric: bool,
 ) -> Result<CaseResult> {
-    let eval_root = workspace.join(".biscuits/eval_sessions").join(format!(
+    let eval_root = workspace.join("biscuits/eval_sessions").join(format!(
         "{}-{}",
         now(),
         sanitize_name(&case.name)
@@ -274,6 +274,7 @@ async fn run_case(
     let prompt = case.prompt.clone();
     let timeout = Duration::from_secs(case.timeout_secs.max(1));
 
+    let mut eval_totals = crate::llm::Totals::default();
     let capture = tokio::time::timeout(
         timeout,
         agent::run_turn(
@@ -287,6 +288,7 @@ async fn run_case(
             "<eval_mode>Run this as an isolated evaluation case.</eval_mode>",
             false,
             0,
+            &mut eval_totals,
         ),
     )
     .await
@@ -556,7 +558,7 @@ fn parse_judge(raw: &str) -> Result<Judge> {
 }
 
 fn save_report(workspace: &Path, report: &EvalReport) -> Result<PathBuf> {
-    let dir = workspace.join(".biscuits/eval_reports");
+    let dir = workspace.join("biscuits/eval_reports");
     fs::create_dir_all(&dir)?;
     let path = dir.join(format!("eval-report-{}.json", report.start_time));
     write_private(
@@ -714,7 +716,7 @@ fn dashboard(workspace: &Path, explicit: Option<&Path>) -> Result<i32> {
 }
 
 fn report_paths(workspace: &Path) -> Result<Vec<PathBuf>> {
-    let dir = workspace.join(".biscuits/eval_reports");
+    let dir = workspace.join("biscuits/eval_reports");
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -731,7 +733,7 @@ fn report_paths(workspace: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn smoke(workspace: &Path) -> Result<i32> {
-    fs::create_dir_all(workspace.join(".biscuits/eval_reports"))?;
+    fs::create_dir_all(workspace.join("biscuits/eval_reports"))?;
     let case = EvalCase {
         name: "smoke".into(),
         category: "infrastructure".into(),

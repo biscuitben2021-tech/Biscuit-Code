@@ -106,9 +106,9 @@ impl SkillStore {
         });
         tiers.push(Tier {
             source: SkillSource::Project,
-            dir: workspace.join(".biscuits").join("skills"),
+            dir: workspace.join("biscuits").join("skills"),
         });
-        let state_path = workspace.join(".biscuits").join("skills.json");
+        let state_path = workspace.join("biscuits").join("skills.json");
         Self::from_parts(tiers, state_path)
     }
 
@@ -257,7 +257,7 @@ impl SkillStore {
     fn render_list(&self) -> String {
         if self.skills.is_empty() {
             let mut out = String::from(
-                "no skills discovered.\nadd one at skills/<name>/SKILL.md (shared) or .biscuits/skills/<name>/SKILL.md (project)",
+                "no skills discovered.\nadd one at skills/<name>/SKILL.md (shared) or biscuits/skills/<name>/SKILL.md (project)",
             );
             self.append_warnings(&mut out);
             return out;
@@ -1015,7 +1015,7 @@ Read the failing command output, find the root cause, then fix it.
     fn open_wires_repo_and_project_tiers_from_workspace() {
         // Exercises the real `open` entry point (not just `from_parts`): the
         // repo tier maps to <workspace>/skills and the project tier to
-        // <workspace>/.biscuits/skills, with project winning on conflicts.
+        // <workspace>/biscuits/skills, with project winning on conflicts.
         let workspace = temp_dir("open-workspace");
         write_skill(
             &workspace.join("skills"),
@@ -1023,7 +1023,7 @@ Read the failing command output, find the root cause, then fix it.
             "---\nname: open-shared\ndescription: repo copy\n---\nrepo body\n",
         );
         write_skill(
-            &workspace.join(".biscuits").join("skills"),
+            &workspace.join("biscuits").join("skills"),
             "open-shared",
             "---\nname: open-shared\ndescription: project copy\n---\nproject body\n",
         );
@@ -1044,9 +1044,9 @@ Read the failing command output, find the root cause, then fix it.
             SkillSource::Repo
         );
 
-        // Disable persists to <workspace>/.biscuits/skills.json and survives reopen.
+        // Disable persists to <workspace>/biscuits/skills.json and survives reopen.
         store.set_enabled("open-shared", false).unwrap();
-        assert!(workspace.join(".biscuits").join("skills.json").is_file());
+        assert!(workspace.join("biscuits").join("skills.json").is_file());
         let reopened = SkillStore::open(&workspace).unwrap();
         let shared = reopened.find("open-shared").unwrap();
         assert!(!reopened.effective_enabled(shared));

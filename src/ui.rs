@@ -56,6 +56,49 @@ pub fn assistant_header() -> String {
     format!("{} {}", cyan(&bold("●")), bold(&cyan("biscuit")))
 }
 
+/// Re-render the user's just-typed message as a right-aligned chat bubble. After
+/// Enter, the `❯ <message>` line is one row above the cursor; we move up, clear
+/// it, and reprint the message right-aligned so the conversation reads like a
+/// chat (user on the right, assistant on the left). No-op when output isn't a
+/// styled TTY, the message is multi-line, or it's too long to align cleanly.
+pub fn echo_user(message: &str) {
+    if !color_enabled() || message.contains('\n') {
+        return;
+    }
+    let width = crossterm::terminal::size()
+        .map(|(w, _)| w as usize)
+        .unwrap_or(80);
+    let label = "you ";
+    let plain_len = label.chars().count() + message.chars().count();
+    if plain_len + 2 >= width {
+        return; // would soft-wrap; leave it as typed
+    }
+    let pad = width - plain_len;
+    let mut out = io::stdout();
+    let _ = writeln!(
+        out,
+        "\x1b[1A\x1b[2K{}{}{}",
+        " ".repeat(pad),
+        grey(label),
+        cyan(message)
+    );
+    let _ = out.flush();
+}
+
+/// Style the persistent bottom status-bar line.
+pub fn status_bar(content: &str) -> String {
+    format!("{} {}", cyan("●"), grey(content))
+}
+
+/// Badge shown at startup when ultracode (max-effort) mode is on.
+pub fn ultracode_badge() -> String {
+    format!(
+        "{} {}",
+        bold(&cyan("⚡ ultracode on")),
+        grey("— max effort: decompose, fan out to sub-agents, verify")
+    )
+}
+
 pub fn stopped(text: &str) -> String {
     format!("{} {}", yellow("■"), yellow(text))
 }

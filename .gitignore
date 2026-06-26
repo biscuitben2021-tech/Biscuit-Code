@@ -1,5 +1,5 @@
 /target/
-/.biscuits/
+/biscuits/
 /.terminal_ai_agent/
 /biscuit/
 
@@ -17,3 +17,4 @@
 
 # Local Claude Code working guide — keep it local, not in the repo.
 CLAUDE.md
+CODEBASE_GUIDE.md

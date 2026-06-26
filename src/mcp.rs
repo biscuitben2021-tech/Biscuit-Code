@@ -92,7 +92,7 @@ struct McpClient {
 
 impl McpManager {
     pub fn open(workspace: &Path) -> Result<Self> {
-        let root = workspace.join(".biscuits");
+        let root = workspace.join("biscuits");
         fs::create_dir_all(&root)?;
         let config_path = root.join("mcp_servers.json");
         let plugins_path = root.join("plugins.json");

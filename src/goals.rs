@@ -86,7 +86,7 @@ struct PlanStep {
 
 impl GoalStore {
     pub fn open(workspace: &Path) -> Result<Self> {
-        let root = workspace.join(".biscuits");
+        let root = workspace.join("biscuits");
         fs::create_dir_all(&root)?;
         let path = root.join("goal_plan.json");
         let mut clobbered = false;

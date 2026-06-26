@@ -38,20 +38,37 @@ pub async fn run_turn(
     extra_system_context: &str,
     print_final: bool,
     depth: usize,
+    totals: &mut llm::Totals,
 ) -> Result<TurnCapture> {
     let start = Instant::now();
     let mut capture = TurnCapture::default();
     let mut activity = ActivityLog::new(print_final);
 
+    // Start the "thinking" spinner the instant the turn begins — before the
+    // workspace snapshot / memory prep / first model call — so the user gets
+    // immediate feedback and never waits on a blank screen. Each planning round
+    // reuses or restarts it; it's always stopped before anything else prints.
+    let mut spinner = print_final.then(|| crate::ui::Spinner::start("thinking…"));
+
     memory.save_turn("user", prompt)?;
     history.push(Msg::new("user", prompt));
     let change_snapshot = memory.change_snapshot()?;
 
+    // Ultracode (max-effort) mode raises the work caps and injects a directive
+    // asking the agent to decompose, fan out to sub-agents, and self-verify.
+    let ultracode = tools.ultracode();
+    let ultracode_ctx = if ultracode {
+        tools::ULTRACODE_DIRECTIVE
+    } else {
+        ""
+    };
+    let subagent_depth = if ultracode { 2 } else { 1 };
+
     // Max tool-planning rounds per turn. The old cap of 8 silently truncated
     // any task needing more steps (the model just stopped getting tools and was
     // forced to answer). A turn can still emit multiple tool calls per round.
-    const MAX_TOOL_ROUNDS: usize = 25;
-    for _ in 0..MAX_TOOL_ROUNDS {
+    let max_tool_rounds = if ultracode { 60 } else { 25 };
+    for _ in 0..max_tool_rounds {
         if perms.stop_requested.load(Ordering::Relaxed) {
             if print_final {
                 println!("\n{}", crate::ui::stopped("halted by user"));
@@ -68,10 +85,15 @@ pub async fn run_turn(
             &tools.system_prompt(),
             &skills_context,
             extra_system_context,
+            ultracode_ctx,
+            &tools.focus_context(),
         ]);
-        // Animated spinner while the model plans (a blocking, non-streaming
-        // request); cleared the moment the plan arrives.
-        let spinner = print_final.then(|| crate::ui::Spinner::start("thinking…"));
+        // Keep the spinner running across prep + this round's model call (reuse
+        // the one started at turn entry on the first round); cleared the moment
+        // the plan arrives.
+        if print_final && spinner.is_none() {
+            spinner = Some(crate::ui::Spinner::start("thinking…"));
+        }
         // Native tool calling (opt-in) when available; on any error fall back to
         // the verified text protocol. Either way `plan` is the assistant text we
         // store in history, keeping persistence text-only.
@@ -110,7 +132,7 @@ pub async fn run_turn(
             let parsed = tools::parse_calls(&text);
             (text, parsed)
         };
-        if let Some(spinner) = spinner {
+        if let Some(spinner) = spinner.take() {
             spinner.stop();
         }
         if parsed.calls.is_empty() && parsed.errors.is_empty() {
@@ -211,6 +233,7 @@ pub async fn run_turn(
                     tools.allow_subagents(),
                     &call,
                     depth,
+                    subagent_depth,
                 )
                 .await
             } else {
@@ -250,6 +273,12 @@ pub async fn run_turn(
         }
     }
 
+    // Defensive: if the loop exited with the spinner still running (e.g. no tool
+    // calls this turn), stop it before any answer output.
+    if let Some(spinner) = spinner.take() {
+        spinner.stop();
+    }
+
     activity.stop_listening();
     let memory_context = memory.system_context(prompt)?;
     let skills_context = tools.skills_context(prompt);
@@ -258,6 +287,8 @@ pub async fn run_turn(
         &tools.system_prompt(),
         &skills_context,
         extra_system_context,
+        ultracode_ctx,
+        &tools.focus_context(),
     ]);
     system_context.push_str(
         "\n\nTool planning for this turn is complete. Answer normally now. Do not emit tool_call tags.",
@@ -288,6 +319,12 @@ pub async fn run_turn(
 
     capture.final_message = answer.clone();
     capture.token_usage = usage.snapshot();
+    // Print the token line NOW — right after the answer and before the (silent)
+    // memory extraction / compaction work — so it can't land in the middle of the
+    // next message while the user types during that gap.
+    if print_final {
+        llm::print_usage_snapshot(capture.token_usage, totals);
+    }
     memory.save_turn("assistant", &answer)?;
     memory.after_turn(client, config, prompt, &answer).await?;
     memory.log_changes(&change_snapshot, prompt)?;
@@ -387,14 +424,10 @@ async fn execute_slash_tool(
     Ok(format!("slash command: {command}\n{output}"))
 }
 
-/// Maximum sub-agent nesting depth. The top-level agent is depth 0; a sub-agent
-/// it spawns runs at depth 1 and may not spawn further sub-agents.
-const MAX_SUBAGENT_DEPTH: usize = 1;
-
 /// Run a delegated task in an isolated sub-agent: its own memory session, fresh
 /// tool runtime, and inherited permission posture. The sub-agent shares the
-/// parent's stop flag so Ctrl-C halts the whole tree, and cannot spawn further
-/// sub-agents.
+/// parent's stop flag so Ctrl-C halts the whole tree. `max_depth` caps nesting
+/// (normally 1; ultracode raises it to 2) so fan-out can't recurse without bound.
 #[allow(clippy::too_many_arguments)]
 async fn execute_task_tool(
     client: &Client,
@@ -405,8 +438,9 @@ async fn execute_task_tool(
     allow: bool,
     call: &tools::ToolCall,
     depth: usize,
+    max_depth: usize,
 ) -> Result<String> {
-    if !allow || depth >= MAX_SUBAGENT_DEPTH {
+    if !allow || depth >= max_depth {
         anyhow::bail!("sub-agents cannot spawn further sub-agents");
     }
     let task_prompt = call
@@ -421,14 +455,16 @@ async fn execute_task_tool(
         .and_then(Value::as_str)
         .unwrap_or("subtask");
 
-    let sub_root = workspace.join(".biscuits/subagents").join(format!(
+    let sub_root = workspace.join("biscuits/subagents").join(format!(
         "{}-{}",
         now_millis(),
         sanitize_label(description)
     ));
     let mut memory = MemoryStore::open_isolated(workspace.clone(), sub_root)?;
     let mut tools = ToolRuntime::new(workspace.clone())?;
-    tools.set_allow_subagents(false);
+    // The child runs at depth+1; it may itself spawn sub-agents only while that
+    // stays under the cap (so ultracode's max_depth=2 allows one more level).
+    tools.set_allow_subagents(depth + 1 < max_depth);
     let mut perms = PermissionGuard::open(&workspace);
     perms.set_mode(parent_mode);
     // Share the parent's interrupt flag so one Ctrl-C stops the whole tree.
@@ -444,6 +480,9 @@ questions, so make reasonable assumptions and state them.</subagent_task>"
 
     // Boxed because run_turn → execute_task_tool → run_turn is a recursive async
     // cycle; the box gives the future a finite size.
+    // Sub-agents don't print, so their token totals aren't surfaced — use a
+    // throwaway accumulator.
+    let mut sub_totals = llm::Totals::default();
     let capture = Box::pin(run_turn(
         client,
         config,
@@ -455,6 +494,7 @@ questions, so make reasonable assumptions and state them.</subagent_task>"
         &system,
         false,
         depth + 1,
+        &mut sub_totals,
     ))
     .await?;
 

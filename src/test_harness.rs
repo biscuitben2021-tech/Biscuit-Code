@@ -106,7 +106,7 @@ pub fn baseline_context(workspace: &Path) -> String {
 }
 
 fn latest_diff_note(workspace: &Path) -> String {
-    let dir = workspace.join(".biscuits/test_runs");
+    let dir = workspace.join("biscuits/test_runs");
     let Ok(entries) = fs::read_dir(dir) else {
         return "No latest diff is available.".into();
     };
@@ -369,19 +369,19 @@ fn save_baseline(workspace: &Path, run: &TestRun) -> Result<()> {
 }
 
 fn save_run(workspace: &Path, run: &TestRun) -> Result<()> {
-    let dir = workspace.join(".biscuits/test_runs");
+    let dir = workspace.join("biscuits/test_runs");
     fs::create_dir_all(&dir)?;
     write_json(&dir.join(format!("test-run-{}.json", run.timestamp)), run)
 }
 
 fn save_diff(workspace: &Path, diff: &TestDiff) -> Result<()> {
-    let dir = workspace.join(".biscuits/test_runs");
+    let dir = workspace.join("biscuits/test_runs");
     fs::create_dir_all(&dir)?;
     write_json(&dir.join(format!("test-diff-{}.json", now())), diff)
 }
 
 fn baseline_path(workspace: &Path) -> PathBuf {
-    workspace.join(".biscuits/test_baseline.json")
+    workspace.join("biscuits/test_baseline.json")
 }
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {

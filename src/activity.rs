@@ -28,6 +28,8 @@ struct ActivityState {
 pub struct ActivityLog {
     requested: bool,
     raw_mode: bool,
+    /// Whether we've shown the one-time "↓/↑ to expand" hint this session.
+    hinted: bool,
     stop: Arc<AtomicBool>,
     state: Arc<Mutex<ActivityState>>,
     handle: Option<JoinHandle<()>>,
@@ -38,6 +40,7 @@ impl ActivityLog {
         Self {
             requested,
             raw_mode: false,
+            hinted: false,
             stop: Arc::new(AtomicBool::new(false)),
             state: Arc::new(Mutex::new(ActivityState::default())),
             handle: None,
@@ -109,13 +112,20 @@ impl ActivityLog {
         }
 
         self.write_block(&format!(
-            "\n{}  {}   {}",
-            crate::ui::cyan("◆"),
-            crate::ui::bold(&entry.title),
-            crate::ui::dim("(↓ expand)")
+            "\n{}  {}",
+            crate::ui::cyan("⏺"),
+            crate::ui::bold(&entry.title)
         ));
+        if !self.hinted {
+            self.hinted = true;
+            self.write_block(&crate::ui::dim("   ↓/↑ expand or collapse tool details"));
+        }
         if self.expanded() {
-            self.write_block(&format!("{}\n{}", crate::ui::dim("details:"), entry.detail));
+            self.write_block(&format!(
+                "{}\n{}",
+                crate::ui::dim("   details:"),
+                entry.detail
+            ));
         }
     }
 
@@ -132,12 +142,16 @@ impl ActivityLog {
         }
 
         self.write_block(&format!(
-            "{}  {}",
-            crate::ui::green("✓"),
+            "  {} {}",
+            crate::ui::green("⎿"),
             crate::ui::dim(brief.trim())
         ));
         if self.expanded() {
-            self.write_block(&format!("{}\n{}", crate::ui::dim("result:"), result.trim()));
+            self.write_block(&format!(
+                "{}\n{}",
+                crate::ui::dim("   result:"),
+                result.trim()
+            ));
         }
     }
 

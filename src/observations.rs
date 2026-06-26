@@ -362,8 +362,8 @@ fn skip_path(root: &Path, path: &Path) -> bool {
         // Normalize separators so these checks hold on Windows too.
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .map(|rel| {
-            rel.starts_with(".biscuits/conversations")
-                || rel == ".biscuits/memory_graph.json"
+            rel.starts_with("biscuits/conversations")
+                || rel == "biscuits/memory_graph.json"
                 || is_biscuit_log_path(&rel)
         })
         .unwrap_or(false)
