@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Biscuit Agent",
+  "version": "0.1.0",
+  "description": "An AI agent that lives in your browser: it reads the page as a structured Agent View and clicks/types to do tasks, gated by a per-task contract and permission mode.",
+  "permissions": ["activeTab", "scripting", "storage", "sidePanel", "tabs"],
+  "host_permissions": ["http://localhost/*", "http://127.0.0.1/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_title": "Biscuit Agent — open side panel" },
+  "side_panel": { "default_path": "sidepanel.html" },
+  "options_page": "options.html",
+  "minimum_chrome_version": "114"
+}

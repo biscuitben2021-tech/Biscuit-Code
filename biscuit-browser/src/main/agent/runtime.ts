@@ -307,7 +307,6 @@ export class AgentRuntime {
  */
 function neutralize(text: string): string {
   return text
-    // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u001f\u007f]/g, " ")
     .replace(/\s+/g, " ")
     .trim()

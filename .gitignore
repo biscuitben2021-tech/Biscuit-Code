@@ -14,3 +14,6 @@
 
 # Zip archives (e.g. biscuit-browser.zip) are build artifacts, never committed.
 *.zip
+
+# Local Claude Code working guide — keep it local, not in the repo.
+CLAUDE.md

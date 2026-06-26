@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Biscuit Agent</title>
+    <style>
+      :root { color-scheme: light dark; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+      }
+      header {
+        padding: 10px 12px;
+        border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      header b { font-size: 14px; }
+      header .sp { flex: 1; }
+      header a { font-size: 12px; opacity: 0.7; text-decoration: none; color: inherit; }
+      #log { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+      .msg { padding: 8px 10px; border-radius: 10px; max-width: 100%; white-space: pre-wrap; word-break: break-word; }
+      .user { align-self: flex-end; background: color-mix(in srgb, dodgerblue 22%, transparent); }
+      .assistant { align-self: flex-start; background: color-mix(in srgb, currentColor 9%, transparent); }
+      .system { align-self: center; font-size: 11px; opacity: 0.6; }
+      .approval { align-self: stretch; border: 1px solid color-mix(in srgb, orange 60%, transparent); border-radius: 10px; padding: 8px 10px; }
+      .approval .row { display: flex; gap: 8px; margin-top: 8px; }
+      .approval button { flex: 1; }
+      .risk-high { color: crimson; font-weight: 600; }
+      footer { padding: 10px 12px; border-top: 1px solid color-mix(in srgb, currentColor 15%, transparent); }
+      .controls { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+      select, input, button, textarea { font: inherit; }
+      button { padding: 6px 10px; border-radius: 8px; border: 1px solid color-mix(in srgb, currentColor 25%, transparent); background: transparent; color: inherit; cursor: pointer; }
+      button.primary { background: dodgerblue; color: white; border-color: dodgerblue; }
+      #task { width: 100%; resize: vertical; min-height: 44px; padding: 8px; border-radius: 8px; border: 1px solid color-mix(in srgb, currentColor 25%, transparent); background: transparent; color: inherit; }
+      .ta-row { display: flex; gap: 8px; margin-top: 8px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <b>🍪 Biscuit Agent</b>
+      <span class="sp"></span>
+      <span id="status" style="font-size:12px;opacity:.7"></span>
+      <a id="opts" href="#">Settings</a>
+    </header>
+    <div id="log"></div>
+    <footer>
+      <div class="controls">
+        <label>Mode</label>
+        <select id="mode">
+          <option value="safe">Safe</option>
+          <option value="assisted" selected>Assisted</option>
+          <option value="auto">Auto</option>
+        </select>
+        <span class="sp" style="flex:1"></span>
+        <button id="stop">Stop</button>
+      </div>
+      <textarea id="task" placeholder="Tell the agent what to do on this page…"></textarea>
+      <div class="ta-row">
+        <button id="run" class="primary" style="flex:1">Run</button>
+      </div>
+    </footer>
+    <script type="module" src="sidepanel.js"></script>
+  </body>
+</html>
